@@ -57,14 +57,14 @@ Start from the closest existing block and replace the robot and the task, rather
 
 ## Naming
 
-- **The block** (its repo and folder): `learning_block_rl_<robot>`, the robot's name in lowercase, one word,
-  e.g. `learning_block_rl_microduck`. Not the task or the trainer: one block trains all its robot's tasks, and
+- **The block** (its repo and folder): `learning-block-rl-<robot>`, the robot's name in lowercase, one word,
+  e.g. `learning-block-rl-microduck`. Not the task or the trainer: one block trains all its robot's tasks, and
   a new task is a task in that block, not a new block.
-- **The shared code:** `learning_block_rl_core` (this repo), Python package `ei_rl`, `ei-rl` to pip.
+- **The shared code:** `learning-block-rl-core` (this repo), Python package `ei_rl`, `ei-rl` to pip.
 - **A robot package:** `<robot>_rl` (e.g. `microduck_rl`), or the name its maker publishes it under.
 - **The deployment block:** `deploy-block-rl-policy`, one for every RL block.
 
-Every RL repo starts with `learning_block_rl_`, so the blocks and their shared code sort together. Older blocks
+Every RL repo starts with `learning-block-rl-`, so the blocks and their shared code sort together. Older blocks
 named `custom_block_rl_*` take the new name when they move to `ei_rl`; ask the user before renaming a repo.
 
 ## The Studio contract for RL
@@ -517,10 +517,10 @@ ENTRYPOINT ["python3", "-u", "ei_train.py"]
 - Install `ei_rl` from a fixed commit, no git needed in the image:
 
   ```text
-  ei-rl[mujoco,sb3] @ https://github.com/edgeimpulse/learning_block_rl_core/archive/<commit>.tar.gz
+  ei-rl[mujoco,sb3] @ https://github.com/edgeimpulse/learning-block-rl-core/archive/<commit>.tar.gz
   ```
 
-  To change it alongside a block, install a checkout over the pin: `pip install -e ../learning_block_rl_core`.
+  To change it alongside a block, install a checkout over the pin: `pip install -e ../learning-block-rl-core`.
 - An external robot package or task library (e.g. an mjlab task) is pinned to a commit and installed at build
   time.
 
@@ -596,7 +596,7 @@ organization once and pick it there (see Deployment).
 1. Ask what the robot is (its model, actuators, sensors), the task and how success and failure are defined, the
    trainer (default: Gymnasium + Stable-Baselines3 PPO on CPU), and whether a real robot will run the policy.
    Look for an existing block with a similar robot or task to start from. Name the new block
-   `learning_block_rl_<robot>` (see Naming); for a new task on a robot that has a block, add it to that block.
+   `learning-block-rl-<robot>` (see Naming); for a new task on a robot that has a block, add it to that block.
 2. Build the robot package first, with no Edge Impulse code: the environment, its tasks registered, `train` and
    `play` (`python -m <robot>_rl.train <task ID>`, a short run that learns something). Then the block around it:
    `studio.toml`, `tasks/_template.py`, `reward_params.py` (generate `parameters.json`), and `ei_train.py`.

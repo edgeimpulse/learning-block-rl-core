@@ -9,8 +9,8 @@ An RL block trains a robot policy by reinforcement learning in a MuJoCo simulati
 | Piece | What it is | Example |
 |---|---|---|
 | **Robot package** | The robot and its tasks, as standard framework code. Works without Edge Impulse | Pollen Robotics' [microduck_rl](https://github.com/pollen-robotics/microduck_rl) (mjlab); `miniauto_rl` (Gymnasium), in the miniAuto block's repo |
-| **Shared code** | [`learning_block_rl_core`](https://github.com/edgeimpulse/learning_block_rl_core), Python package `ei_rl`: everything specific to Edge Impulse | `ei_rl.core`, `ei_rl.viz`, `ei_rl.bundle`, `ei_rl.mjlab`, `ei_rl.sb3` |
-| **Learn block** | `learning_block_rl_<robot>`: what is pushed to Studio. A Dockerfile that pins the two above, a generated `parameters.json`, the list of tasks Studio shows, and optional tasks of its own | [learning_block_rl_microduck](https://github.com/edgeimpulse/learning_block_rl_microduck) |
+| **Shared code** | [`learning-block-rl-core`](https://github.com/edgeimpulse/learning-block-rl-core), Python package `ei_rl`: everything specific to Edge Impulse | `ei_rl.core`, `ei_rl.viz`, `ei_rl.bundle`, `ei_rl.mjlab`, `ei_rl.sb3` |
+| **Learn block** | `learning-block-rl-<robot>`: what is pushed to Studio. A Dockerfile that pins the two above, a generated `parameters.json`, the list of tasks Studio shows, and optional tasks of its own | [learning-block-rl-microduck](https://github.com/edgeimpulse/learning-block-rl-microduck) |
 | **Studio side** | Two extensions that read the block's custom data, and a deployment block that downloads the policy | [RL training monitor](https://github.com/edgeimpulse/rl_training_monitor_extension), [RL policy simulator](https://github.com/edgeimpulse/rl_policy_simulator_extension), [deploy-block-rl-policy](https://github.com/edgeimpulse/deploy-block-rl-policy) |
 
 ```
@@ -29,12 +29,12 @@ The rule users rely on: **if a task trains with the framework's own `train` comm
 
 | What | Name | Example |
 |---|---|---|
-| A learn block (repo and folder) | `learning_block_rl_<robot>`: the robot's name, in lowercase, one word. Not the task or the trainer: one block trains all its robot's tasks | `learning_block_rl_microduck` |
-| The shared code | `learning_block_rl_core`, Python package `ei_rl` (`ei-rl` to pip) | |
+| A learn block (repo and folder) | `learning-block-rl-<robot>`: the robot's name, in lowercase, one word. Not the task or the trainer: one block trains all its robot's tasks | `learning-block-rl-microduck` |
+| The shared code | `learning-block-rl-core`, Python package `ei_rl` (`ei-rl` to pip) | |
 | A robot package | `<robot>_rl`, or the name its maker publishes it under | `microduck_rl` |
 | The deployment block | `deploy-block-rl-policy`, one for every RL block | |
 
-Every RL repo starts with `learning_block_rl_`, so the blocks and their shared code sort together and show up in one search. The blocks not yet on `ei_rl` keep their old `custom_block_rl_*` names until they move (see [Blocks today](#blocks-today)).
+Every RL repo starts with `learning-block-rl-`, so the blocks and their shared code sort together and show up in one search. The blocks not yet on `ei_rl` keep their old `custom_block_rl_*` names until they move (see [Blocks today](#blocks-today)).
 
 ## Vocabulary
 
@@ -74,7 +74,7 @@ gym.register("MiniAuto-Football-v0", entry_point="miniauto_rl.football:MiniAutoF
 
 It also has `make(task_id, **kwargs)`, which builds a task's environment without the wrappers `gymnasium.make()` adds (the block calls the environment's own methods and its MuJoCo model), and `env_creator(task_id, **kwargs)`, the class and its arguments, which Stable-Baselines3's worker processes get in place of the task ID (they don't have the block's own registrations). `miniauto_rl` lives in the block's repo, installed with its `pyproject.toml`.
 
-## The shared code: `learning_block_rl_core`
+## The shared code: `learning-block-rl-core`
 
 | Module | What it does |
 |---|---|
@@ -87,7 +87,7 @@ It also has `make(task_id, **kwargs)`, which builds a task's environment without
 A block installs it from a pinned commit, with only the extras it uses; there is no PyPI release:
 
 ```dockerfile
-RUN pip install "ei-rl[mjlab] @ https://github.com/edgeimpulse/learning_block_rl_core/archive/<commit>.tar.gz"
+RUN pip install "ei-rl[mjlab] @ https://github.com/edgeimpulse/learning-block-rl-core/archive/<commit>.tar.gz"
 ```
 
 The base install needs only numpy and pillow. The extras: `mujoco` for the simulator bundle, `sb3` for Stable-Baselines3 and torch, `mjlab` for mjlab and rsl_rl. A block updates when it moves its pin, and a fix reaches every block that does.
@@ -102,7 +102,7 @@ The microduck block's files (the miniAuto block has the same ones, with its pack
 
 | File | What it does |
 |---|---|
-| `Dockerfile` | Pins microduck_rl and `learning_block_rl_core` to commits and installs them in microduck_rl's own environment (miniAuto: installs `miniauto_rl` from the repo) |
+| `Dockerfile` | Pins microduck_rl and `learning-block-rl-core` to commits and installs them in microduck_rl's own environment (miniAuto: installs `miniauto_rl` from the repo) |
 | `studio.toml` | Which tasks Studio lists, in which order, their labels, how the block evaluates each one, and the reward terms Studio leaves out |
 | `tasks/` | The block's own tasks, in the same format as the robot package's (`hop.py`), and the template of Studio's code editor (`_template.py`) |
 | `reward_params.py` | Generates `parameters.json` from the tasks (`--check` fails if it is out of date), and applies the reward weights set in Studio |
@@ -191,8 +191,8 @@ After a change to a task or to `studio.toml`, regenerate `parameters.json` with 
 
 | Block | Stack | GPU | On `ei_rl` | Robot and tasks |
 |---|---|---|---|---|
-| microduck (`learning_block_rl_microduck`) | mjlab + rsl_rl PPO | Yes | Yes, on the `ei-rl-core` branch | microduck_rl, pinned; the hop and the code editor's template in `tasks/` |
-| miniAuto (`learning_block_rl_miniauto`) | Gymnasium + SB3 PPO, self-play | No | Yes, locally; not yet committed | `miniauto_rl`, a package in the block's repo: `MiniAuto-Football-v0`; the code editor's template in `tasks/` |
+| microduck (`learning-block-rl-microduck`) | mjlab + rsl_rl PPO | Yes | Yes, on the `ei-rl-core` branch | microduck_rl, pinned; the hop and the code editor's template in `tasks/` |
+| miniAuto (`learning-block-rl-miniauto`) | Gymnasium + SB3 PPO, self-play | No | Yes, locally; not yet committed | `miniauto_rl`, a package in the block's repo: `MiniAuto-Football-v0`; the code editor's template in `tasks/` |
 | SO-101 push cube (`custom_block_rl_so101arm_sim`) | Gymnasium + SB3 PPO | No | Not yet: its own copy of the integration | In the block (`so101_push_env.py`) |
 | Unitree Go2 walk (`custom_block_rl_unitree_sim`) | Gymnasium + SB3 PPO | No | Not yet: its own copy of the integration | In the block (`go2_env.py`), robot from MuJoCo Menagerie |
 

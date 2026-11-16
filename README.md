@@ -25,7 +25,7 @@ extension changes, the blocks get the change by moving their pin to a newer comm
 There is no PyPI release. A block installs a fixed commit, in its requirements file:
 
 ```text
-ei-rl[mujoco,sb3] @ https://github.com/edgeimpulse/learning_block_rl_core/archive/<commit>.tar.gz
+ei-rl[mujoco,sb3] @ https://github.com/edgeimpulse/learning-block-rl-core/archive/<commit>.tar.gz
 ```
 
 | Extra | Adds | For |
@@ -38,7 +38,7 @@ ei-rl[mujoco,sb3] @ https://github.com/edgeimpulse/learning_block_rl_core/archiv
 The archive URL needs no git in the image. The package's dependencies are lower bounds only; the block pins
 the exact versions it trains with. An mjlab block usually gets mjlab from its robot package's lock file and
 installs `ei-rl` into that environment, which keeps those versions. To change this code alongside a block, install your checkout over the
-pinned one: `pip install -e ../learning_block_rl_core`.
+pinned one: `pip install -e ../learning-block-rl-core`.
 
 **Torch on Linux.** The `[sb3]` extra needs torch. On Linux, the torch wheels on PyPI also install NVIDIA's CUDA
 libraries (`nvidia-*` packages, several GB, under NVIDIA's proprietary license) and triton. A block that trains on
