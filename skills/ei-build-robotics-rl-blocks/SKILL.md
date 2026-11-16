@@ -34,21 +34,24 @@ Read those README sections before writing a task descriptor or a `sim.json`.
 | Layer | Holds | Example |
 |---|---|---|
 | `ei_rl` (this repo) | The Studio contract, the two formats, the trainer integrations | `RLViz`, `RLVizCallback`, `export_onnx`, `write_bundle` |
-| The robot and task | The MJCF scene, the environment, the rewards, the randomization. Ideally usable without Edge Impulse | `miniauto_soccer_env.py`, a Gymnasium env; or an mjlab task registration |
-| The block | The Studio entry point and the task-specific glue for the extensions | `ei_train.py`, `rl_viz.py`, `sim_bundle.py`, `parameters.json`, `Dockerfile` |
+| The robot package | The MJCF scene, the environments, the rewards, the randomization, registered as tasks the framework's way; its own train and play commands. No Edge Impulse code | `microduck_rl` (mjlab tasks, the robot maker's); `miniauto_rl` (Gymnasium tasks, in the block's repo) |
+| The block | The Studio entry point, which tasks Studio lists, the block's own tasks, and the task-specific glue for the extensions | `ei_train.py`, `studio.toml`, `tasks/`, `rl_viz.py`, `sim_bundle.py`, `Dockerfile` |
 
 A typical block:
 
 | File | Purpose |
 |---|---|
-| `<robot>_env.py` (or a dependency) | The environment |
-| `train.py` | The training loop, also runnable on its own (`python train.py --timesteps ...`) |
-| `ei_train.py` | The ENTRYPOINT: arguments, training, export, verification, evaluation, metrics |
+| `<robot>_rl/` (or a pinned dependency) | The robot package (see [Tasks](#tasks)) |
+| `pyproject.toml`, `LICENSE` | Make the package in the block's repo installable (`pip install -e .`) |
+| `ei_train.py` | The ENTRYPOINT: arguments, the task, training, export, verification, evaluation, metrics, `policy/` |
+| `studio.toml`, `studio.py` | Which tasks Studio lists, their labels, the default; `studio.load()` registers every task and returns that list |
+| `tasks/` | The block's own tasks, in the robot package's format; `_template.py`, the code editor's starting code; `python -m tasks train\|play\|list-envs` |
+| `reward_params.py` | Generates `parameters.json` (the Task option, the reward weights) from the tasks, `--check`, and applies the weights set in Studio |
 | `rl_viz.py` | `task_info()` (the task descriptor) and `rollout_snapshot()` (the test each snapshot plays) |
 | `sim_bundle.py` | `describe()` (sim.json), `write_bundle()`, a Python `Engine` that runs the bundle, `--check` |
 | `record_samples.py` | Optional: model inputs and outputs as Studio samples |
-| `parameters.json`, `Dockerfile`, `requirements-block.txt` | The block |
-| `requirements.txt`, `setup.sh` | A local venv with the same pins |
+| `parameters.json` (generated), `Dockerfile`, `requirements-block.txt` | The block |
+| `requirements.txt`, `setup.sh` | A local venv with the same pins, and the package installed editable |
 
 Start from the closest existing block and replace the robot and the task, rather than from scratch.
 
@@ -136,6 +139,78 @@ Design it for sim-to-real from the start, since the bundle has to describe all o
   motor parameters, latency), with nominal values for the snapshots and ranges for the evaluation;
 - a `randomize=False` mode and a seeded `reset(seed=...)`, so a snapshot or a test is the same every time.
 
+## Tasks
+
+A **task** is a registered ID, the framework's way: `register_mjlab_task(...)` for mjlab, `gym.register(...)` for
+Gymnasium. The block trains tasks by ID, so a task that trains with the robot package's own `train` command
+trains in the block, and a new task is a registration, not new block code.
+
+**The robot package** (`<robot>_rl`) registers its tasks on import and has its own `train` and `play` commands. It
+imports nothing from Edge Impulse, so it works without Studio; the block installs it unchanged (pinned to a commit,
+or from the block's repo with a `pyproject.toml`). An mjlab package declares an entry point in the `mjlab.tasks`
+group, which mjlab imports. A Gymnasium package:
+
+```python
+# miniauto_rl/__init__.py
+TASKS = ("MiniAuto-Football-v0",)
+if "MiniAuto-Football-v0" not in gym.registry:     # registering an ID again only warns: guard it
+    gym.register("MiniAuto-Football-v0", entry_point="miniauto_rl.football:MiniAutoFootballEnv")
+
+def env_creator(task_id, **kwargs):
+    """(the class that builds the task, its registration's kwargs updated with kwargs)"""
+    spec = gym.spec(task_id)
+    creator = load_env_creator(spec.entry_point) if isinstance(spec.entry_point, str) else spec.entry_point
+    return creator, {**spec.kwargs, **kwargs}
+
+def make(task_id, **kwargs):                       # gymnasium.make() without its wrappers
+    creator, kw = env_creator(task_id, **kwargs)
+    return creator(**kw)
+```
+
+- Use `make()`, not `gymnasium.make()`, where the code calls the env's own methods or its MuJoCo model (the
+  evaluation, the snapshots, the bundle): the wrappers `gymnasium.make()` adds hide them.
+- Give `SubprocVecEnv` the creator and its kwargs (`make_vec_env(creator, env_kwargs=kw, vec_env_cls=SubprocVecEnv)`),
+  not the task ID: a worker process doesn't have the registrations of the block's own tasks or the code editor's.
+- A variant (other reward weights, another episode length) is another registration that reuses the env with other
+  kwargs; a new reward term is a subclass, registered under its own ID.
+
+**Studio's Task option.** `studio.toml` is the only Edge Impulse file about tasks, and it stays in the block:
+
+```toml
+[tasks."MiniAuto-Football-v0"]
+name = "Football, one on one (self-play)"   # the label in Studio's Task option
+default = true                               # the task the form starts with
+```
+
+`studio.load(code_file=None)` imports the robot package and every `tasks/*.py` not starting with `_` (each one
+registers its tasks), then returns `{task ID: Task}` in the order Studio lists them; a task in `tasks/` that
+`studio.toml` doesn't list comes after, under its ID. `python -m tasks train|play|list-envs` runs the robot
+package's commands with the block's tasks registered, so a task is tested before it is pushed.
+
+**Reward weights in Studio.** `reward_params.py` generates `parameters.json` from the tasks: the Task option, and
+for each task its reward weights, read from the environment it builds, under `"section": "advanced"` with a
+`showIf` on the task (param `reward-<task slug>-<term>`, the default being the task's weight). Run it after any
+change to a task or to `studio.toml`; `reward_params.py --check`, in the Dockerfile, fails when `parameters.json`
+is out of date. At training, `apply(task_id, args)` returns the env kwargs for the weights that differ from their
+default (so an untouched form trains the task as registered) and the list of changes, for the run info and
+`DEPLOY.md`. It ignores the other tasks' fields (Studio may pass them), and rejects a weight whose sign is the
+opposite of the default's.
+
+- argparse reads `-1e-05` as an option: join each value to its flag first (`--reward-x=-1e-05`,
+  `reward_params.join_values(sys.argv[1:])`).
+
+**Your own task in Studio's code editor.** The Task option ends with "Your own task (code editor)" (value
+`code-editor`), and a **Task code** parameter of type `code_editor` (`"codeEditorLanguage": "python"`, `showIf`
+on it) whose default is `tasks/_template.py`: a task module, commented for a user, that subclasses the robot's
+env and registers exactly one task under a new ID. It may set `STUDIO = dict(name=...)` in place of a
+`studio.toml` entry. `ei_train.py` saves the code as `policy/task.py` and calls `studio.load(that_file)`, which
+reports a syntax error with its line and fails unless the code registers exactly one task. Its reward weights are
+in its code: no weight fields show for it.
+
+- With `SubprocVecEnv`, the class defined in that file must reach the workers: `cloudpickle.register_pickle_by_value(module)`
+  after importing it (the module isn't importable in the workers).
+- Check the template in the Dockerfile: it must register a task that builds and resets.
+
 ## Training
 
 **Stable-Baselines3:** add `RLVizCallback` to `learn`. It logs every rollout, plays the snapshots, schedules the
@@ -147,8 +222,8 @@ from ei_rl.viz import RLViz
 
 viz = RLViz(custom_data, total_timesteps=args.timesteps_millions * 1e6, max_minutes=args.max_minutes,
             task=task_info(), checkpoint=checkpoint,              # see the bundle section
-            run_info=dict(n_envs=n_envs, seed=args.seed))
-callback = RLVizCallback(viz, rollout=lambda policy, render: rollout_snapshot(policy, render=render))
+            run_info=dict(task=task_id, n_envs=n_envs, seed=args.seed))
+callback = RLVizCallback(viz, rollout=lambda policy, render: rollout_snapshot(task_id, policy, render=render))
 model.learn(total_timesteps=int(args.timesteps_millions * 1e6), callback=[callback, WallClockLimit(args.max_minutes)])
 ```
 
@@ -188,7 +263,7 @@ viz.finish(step)
 
 **The wall-clock budget.** Studio jobs have a time limit. Stop at `--max-minutes` whatever the timesteps, then
 export what you have. `RLVizCallback` doesn't stop training: add a callback whose `_on_step` returns `False` past
-the deadline (`WallClockLimit` in the miniAuto block's `train.py`), or check `viz.out_of_time()` in your loop. Snapshots follow whichever of timesteps and time is further.
+the deadline (`WallClockLimit` in the miniAuto block's `miniauto_rl/train.py`), or check `viz.out_of_time()` in your loop. Snapshots follow whichever of timesteps and time is further.
 Say in the parameter's help to keep it below the job limit, and in the README what a run gives at a few budgets.
 
 ## Exporting the policy
@@ -200,7 +275,7 @@ The ONNX contract the extensions and the deployment rely on: input `"input"` `[1
 from ei_rl.sb3 import export_onnx, verify_onnx
 
 export_onnx(model, vec_norm, out / "model.onnx", obs_dim=OBS_DIM)    # obs_dim: the actor's part, with a privileged critic
-verify_onnx(model, vec_norm, out / "model.onnx", MyRobotEnv(randomize=False), obs_dim=OBS_DIM)  # vs model.predict, 1e-4
+verify_onnx(model, vec_norm, out / "model.onnx", make(task_id, randomize=False), obs_dim=OBS_DIM)  # vs model.predict, 1e-4
 ```
 
 Another trainer writes its own exporter to the same contract and checks it against its own inference the same
@@ -297,7 +372,7 @@ live = False
 if custom_data is not None:
     clear_policies(custom_data)
     try:                                   # the bundle is optional: never stop a training over it
-        print_live_header(sim_bundle.write_bundle(custom_data, env_kwargs))
+        print_live_header(sim_bundle.write_bundle(custom_data, task_id, env_kwargs))
         live = True
     except Exception as err:
         print(f"WARNING: no simulation bundle for the policy simulator extension: {err!r}")
@@ -329,7 +404,11 @@ directory and copies to the custom data (`custom_data/policy/`, where the simula
 - `model.onnx`, and the trainer's checkpoint it was exported from (`model_<n>.pt`, `model.zip`), to resume,
   fine-tune or re-export it. Only that one: the trainer's other checkpoints stay in the job's work directory,
   which is gone after the job;
-- the configs it trained with (rsl_rl's `params/env.yaml` and `params/agent.yaml`, or the block's arguments);
+- the configs it trained with: rsl_rl's `params/env.yaml` and `params/agent.yaml`; for Stable-Baselines3,
+  `params/env.json` (the task ID and the env's kwargs, with the reward weights) and `params/agent.json` (the PPO
+  settings), and `vecnormalize.pkl`, the normalizer the checkpoint needs;
+- the robot runtime's settings, if the block has them (`deploy_config.json`: the control rate, the input layout,
+  the action scaling);
 - `DEPLOY.md`, how to use this policy (below);
 - the task's code when the user wrote it in Studio's code editor (`task.py`).
 
@@ -380,8 +459,11 @@ Trained by the Edge Impulse <robot> block with {trained_with}.
         + "".join(f"- {k}: {v:.4g}\n" if isinstance(v, float) else f"- {k}: {v}\n" for k, v in metrics.items()))
 ```
 
-The microduck block's `write_policy_dir()` (in its `ei_train.py`) is a complete one: it adds the commands for
-each kind of task (perpetual or episodic) and for the block's own tasks.
+Two complete ones, both `write_policy_dir()` in the block's `ei_train.py`: the microduck block's (mjlab), with
+the commands for each kind of task (perpetual or episodic); the miniAuto block's (Stable-Baselines3), with
+`model.zip`, `vecnormalize.pkl` and `deploy_config.json`. Both write the commands for the robot package's tasks
+(`python -m <robot>_rl.play <task ID> ...`), the block's own (`python -m tasks play ...`) and the code editor's
+(copy `task.py` to `tasks/` first).
 
 **Which deployment to pick.** For the ONNX policy only, the **Custom block** deployment type on Studio's
 **Deployment** tab is enough: its zip has `model.onnx` (and its conversions). For everything about the policy
@@ -408,11 +490,20 @@ ENV MUJOCO_GL=osmesa PYOPENGL_PLATFORM=osmesa
 COPY requirements-block.txt ./
 RUN pip3 install --break-system-packages -r requirements-block.txt
 
-COPY myrobot_env.py train.py ei_train.py rl_viz.py sim_bundle.py assets/ ./
+# The robot package, its dependencies already installed above (or pinned to a commit in requirements-block.txt)
+COPY pyproject.toml LICENSE ./
+COPY myrobot_rl/ ./myrobot_rl/
+RUN pip3 install --break-system-packages --no-deps --no-build-isolation .
 
-# Fail the build early: the env steps, offscreen rendering works, the bundle reproduces the env
-RUN python3 -c "from myrobot_env import MyRobotEnv; e = MyRobotEnv(); e.reset(seed=0); e.step(e.action_space.sample())"
-RUN python3 -c "from rl_viz import rollout_snapshot; f, s = rollout_snapshot(lambda o: [0.0] * ACT_DIM, seconds=0.2)"
+COPY ei_train.py studio.py studio.toml reward_params.py parameters.json rl_viz.py sim_bundle.py ./
+COPY tasks/ ./tasks/
+
+# Fail the build early: every task builds, parameters.json is up to date, the code editor's template registers a
+# task, offscreen rendering works, the bundle reproduces the env
+RUN python3 -c "import studio, myrobot_rl; [myrobot_rl.make(t).reset(seed=0) for t in studio.load()]"
+RUN python3 reward_params.py --check
+RUN python3 -c "import studio, myrobot_rl; t = [t for t in studio.load('tasks/_template.py').values() if t.from_code_editor][0]; myrobot_rl.make(t.task_id).reset(seed=0)"
+RUN python3 -c "from rl_viz import rollout_snapshot; rollout_snapshot('MyRobot-Walk-v0', lambda o: [0.0] * ACT_DIM, seconds=0.2)"
 RUN python3 sim_bundle.py --out /tmp/sim-check --check && rm -rf /tmp/sim-check
 
 ENTRYPOINT ["python3", "-u", "ei_train.py"]
@@ -484,6 +575,9 @@ checkpoints, `model.onnx` and `sim/` byte for byte. Run the old code twice first
 - A snapshot or checkpoint failure that raises: catch it, warn, and keep training.
 - Stale descriptions: when the observation or action changes, update `parameters.json`, the README and
   `deploy_config.json` along with it.
+- A hand-edited `parameters.json`: it is generated; edit the tasks or `studio.toml`, then run `reward_params.py`.
+- Task IDs passed to `SubprocVecEnv` workers, or a code editor class pickled by reference: the workers fail to
+  build the env (see [Tasks](#tasks)).
 
 ## Push
 
@@ -503,8 +597,9 @@ organization once and pick it there (see Deployment).
    trainer (default: Gymnasium + Stable-Baselines3 PPO on CPU), and whether a real robot will run the policy.
    Look for an existing block with a similar robot or task to start from. Name the new block
    `learning_block_rl_<robot>` (see Naming); for a new task on a robot that has a block, add it to that block.
-2. Build and test the environment on its own first (`train.py`, a short run that learns something), then wrap it
-   in `ei_train.py`.
+2. Build the robot package first, with no Edge Impulse code: the environment, its tasks registered, `train` and
+   `play` (`python -m <robot>_rl.train <task ID>`, a short run that learns something). Then the block around it:
+   `studio.toml`, `tasks/_template.py`, `reward_params.py` (generate `parameters.json`), and `ei_train.py`.
 3. Use `ei_rl` for everything it covers; don't copy its code into the block. If the block needs a change
    in it, make it there, keeping the formats unchanged.
 4. Write `task_info()` and `rollout_snapshot()` from the monitor's README, and `describe()` from the simulator's

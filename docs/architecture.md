@@ -8,14 +8,14 @@ An RL block trains a robot policy by reinforcement learning in a MuJoCo simulati
 
 | Piece | What it is | Example |
 |---|---|---|
-| **Robot package** | The robot and its tasks, as standard framework code. Works without Edge Impulse | Pollen Robotics' [microduck_rl](https://github.com/pollen-robotics/microduck_rl) (mjlab) |
+| **Robot package** | The robot and its tasks, as standard framework code. Works without Edge Impulse | Pollen Robotics' [microduck_rl](https://github.com/pollen-robotics/microduck_rl) (mjlab); `miniauto_rl` (Gymnasium), in the miniAuto block's repo |
 | **Shared code** | [`learning_block_rl_core`](https://github.com/edgeimpulse/learning_block_rl_core), Python package `ei_rl`: everything specific to Edge Impulse | `ei_rl.core`, `ei_rl.viz`, `ei_rl.bundle`, `ei_rl.mjlab`, `ei_rl.sb3` |
 | **Learn block** | `learning_block_rl_<robot>`: what is pushed to Studio. A Dockerfile that pins the two above, a generated `parameters.json`, the list of tasks Studio shows, and optional tasks of its own | [learning_block_rl_microduck](https://github.com/edgeimpulse/learning_block_rl_microduck) |
 | **Studio side** | Two extensions that read the block's custom data, and a deployment block that downloads the policy | [RL training monitor](https://github.com/edgeimpulse/rl_training_monitor_extension), [RL policy simulator](https://github.com/edgeimpulse/rl_policy_simulator_extension), [deploy-block-rl-policy](https://github.com/edgeimpulse/deploy-block-rl-policy) |
 
 ```
 Studio ──starts──> learn block (Docker image)
-                     ├─ registers the tasks: the robot package's (mjlab entry points) and the block's own (tasks/)
+                     ├─ registers the tasks: the robot package's (mjlab entry points, gym.register) and the block's own (tasks/)
                      ├─ trains the selected task, through ei_rl's trainer integration
                      ├─ out directory ──> model.onnx, metrics            ──> Studio (impulse, Experiments tab)
                      └─ custom data   ──> telemetry, snapshots           ──> RL training monitor
@@ -66,6 +66,14 @@ register_mjlab_task(
 
 mjlab finds the package without any Edge Impulse code: the package declares an entry point in the `mjlab.tasks` group (`[project.entry-points."mjlab.tasks"]` in its `pyproject.toml`), and mjlab imports every package in that group. The robot's maker, or we, maintain the package; the block pins it to a commit in its Dockerfile and installs it unchanged.
 
+A Gymnasium package registers its tasks when it is imported, and has its own `train` and `play` modules:
+
+```python
+gym.register("MiniAuto-Football-v0", entry_point="miniauto_rl.football:MiniAutoFootballEnv")
+```
+
+It also has `make(task_id, **kwargs)`, which builds a task's environment without the wrappers `gymnasium.make()` adds (the block calls the environment's own methods and its MuJoCo model), and `env_creator(task_id, **kwargs)`, the class and its arguments, which Stable-Baselines3's worker processes get in place of the task ID (they don't have the block's own registrations). `miniauto_rl` lives in the block's repo, installed with its `pyproject.toml`.
+
 ## The shared code: `learning_block_rl_core`
 
 | Module | What it does |
@@ -90,11 +98,11 @@ The repo also holds the agent skill for building RL blocks ([skills/ei-build-rob
 
 ## The learn block
 
-The microduck block's files:
+The microduck block's files (the miniAuto block has the same ones, with its package in the repo):
 
 | File | What it does |
 |---|---|
-| `Dockerfile` | Pins microduck_rl and `learning_block_rl_core` to commits and installs them in microduck_rl's own environment |
+| `Dockerfile` | Pins microduck_rl and `learning_block_rl_core` to commits and installs them in microduck_rl's own environment (miniAuto: installs `miniauto_rl` from the repo) |
 | `studio.toml` | Which tasks Studio lists, in which order, their labels, how the block evaluates each one, and the reward terms Studio leaves out |
 | `tasks/` | The block's own tasks, in the same format as the robot package's (`hop.py`), and the template of Studio's code editor (`_template.py`) |
 | `reward_params.py` | Generates `parameters.json` from the tasks (`--check` fails if it is out of date), and applies the reward weights set in Studio |
@@ -118,7 +126,7 @@ A task in `tasks/` that `studio.toml` doesn't list appears under its ID.
 
 **Your own task in Studio.** The Task option also offers "Your own task (code editor)". The **Task code** parameter (Studio's `code_editor` type) starts with `tasks/_template.py`: a task file that registers one task with its own ID, and may set `STUDIO = dict(name=..., evaluation=...)` in place of a `studio.toml` entry. Its reward weights are in its code, so no weight fields show for it. The block saves it as `policy/task.py`, next to the model.
 
-**Locally**, `python -m tasks train|play|list-envs` runs mjlab's own scripts with the block's tasks registered, so a task is tested with the framework's commands before it is pushed.
+**Locally**, `python -m tasks train|play|list-envs` runs the framework's own scripts (mjlab's, or `miniauto_rl.train` and `.play`) with the block's tasks registered, so a task is tested with the framework's commands before it is pushed.
 
 ## A training job
 
@@ -142,8 +150,9 @@ A task in `tasks/` that `studio.toml` doesn't list appears under its ID.
 
 `policy/` holds what the robot needs besides the model:
 
-- `model.onnx`, and the rsl_rl checkpoint it was exported from (`model_<n>.pt`), to resume, fine-tune or re-export it. Only that one: rsl_rl's other checkpoints stay in the job's work directory, which is gone after the job;
-- `params/env.yaml` and `params/agent.yaml`, the configs it trained with, with the reward weights set in Studio;
+- `model.onnx`, and the checkpoint it was exported from (rsl_rl's `model_<n>.pt`; for Stable-Baselines3, `model.zip` and `vecnormalize.pkl`), to resume, fine-tune or re-export it. Only that one: the trainer's other checkpoints stay in the job's work directory, which is gone after the job;
+- `params/env.yaml` and `params/agent.yaml` (Stable-Baselines3: `params/env.json` and `params/agent.json`), the configs it trained with, with the reward weights set in Studio;
+- `deploy_config.json`, for a block whose robot runtime needs it (the miniAuto's: the control rate, the input layout, the action scaling);
 - `DEPLOY.md`, generated for the run: the task and what it trained with, the commands to play it in simulation and to put it on the robot (with the run's task ID and checkpoint name), the reward weights changed in Studio, the evaluation;
 - `task.py`, for a task written in the code editor.
 
@@ -161,7 +170,7 @@ Studio's **Deployment** tab gives a deployment block the model and its conversio
 | A **task** on an existing robot | A registration with a new ID that reuses an environment and agent config, with changed rewards or commands, in the block's `tasks/`. Or the same in Studio's code editor | `python -m tasks train <task-id>` |
 | An **environment** | An environment config, usually built from an existing one, plus a task that registers it | `train`, `play` |
 | A **policy** | An agent config (network, PPO settings), plus a task that pairs it with an environment | `train` |
-| A **robot** | A robot package (MJCF, from MuJoCo Menagerie for many robots; robot config; tasks; the `mjlab.tasks` entry point), then a block that pins it, with its `studio.toml`, `rl_viz.py` and `sim_bundle.py` | `list-envs`, `train`, `play` |
+| A **robot** | A robot package (MJCF, from MuJoCo Menagerie for many robots; robot config; tasks; the `mjlab.tasks` entry point, or `gym.register` on import), then a block that pins it, with its `studio.toml`, `rl_viz.py` and `sim_bundle.py` | `list-envs`, `train`, `play` |
 
 After a change to a task or to `studio.toml`, regenerate `parameters.json` with `reward_params.py`. The microduck README's "Your own task" walks through the hop as an example; the [skill](../skills/ei-build-robotics-rl-blocks/SKILL.md) covers a new block end to end.
 
@@ -183,8 +192,8 @@ After a change to a task or to `studio.toml`, regenerate `parameters.json` with 
 | Block | Stack | GPU | On `ei_rl` | Robot and tasks |
 |---|---|---|---|---|
 | microduck (`learning_block_rl_microduck`) | mjlab + rsl_rl PPO | Yes | Yes, on the `ei-rl-core` branch | microduck_rl, pinned; the hop and the code editor's template in `tasks/` |
-| miniAuto football | Gymnasium + SB3 PPO, self-play | No | Yes, locally; not yet committed or renamed | In the block (`miniauto_soccer_env.py`) |
+| miniAuto (`learning_block_rl_miniauto`) | Gymnasium + SB3 PPO, self-play | No | Yes, locally; not yet committed | `miniauto_rl`, a package in the block's repo: `MiniAuto-Football-v0`; the code editor's template in `tasks/` |
 | SO-101 push cube (`custom_block_rl_so101arm_sim`) | Gymnasium + SB3 PPO | No | Not yet: its own copy of the integration | In the block (`so101_push_env.py`) |
 | Unitree Go2 walk (`custom_block_rl_unitree_sim`) | Gymnasium + SB3 PPO | No | Not yet: its own copy of the integration | In the block (`go2_env.py`), robot from MuJoCo Menagerie |
 
-The SB3 blocks also write `deploy_config.json` (the control rate, the action scaling, the default joint positions), in their own code. Their robots and tasks are still inside the blocks; moving them to packages (`so101_rl`, `go2_rl`, `miniauto_rl`) with Gymnasium registration is the next step for them.
+The SB3 blocks also write `deploy_config.json` (the control rate, the action scaling, the default joint positions), in their own code. The miniAuto block has moved its robot to a package with Gymnasium registration, and has the microduck block's Task option, reward weights and code editor; SO-101 and Go2 still have their robots and tasks inside the blocks, and moving them to packages (`so101_rl`, `go2_rl`) the same way is the next step for them.
