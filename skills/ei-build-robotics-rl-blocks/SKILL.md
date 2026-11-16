@@ -1,6 +1,6 @@
 ---
 name: ei-build-robotics-rl-blocks
-description: Build an Edge Impulse custom learning block that trains a robot policy with reinforcement learning in simulation (MuJoCo, Gymnasium, Stable-Baselines3 or another trainer), using the shared ei_rl package. Covers the block layout, the Studio contract for a block without training data, the environment contract, training on a wall-clock budget, the ONNX export of the actor, the training telemetry for the RL training monitor extension (rl-viz, the task descriptor, snapshots), the simulation bundle and live checkpoints for the RL policy simulator extension (ei-rl-sim), the sim-to-sim evaluation, the Dockerfile, pinning, asset licenses, local tests and pushing. Use when asked to create, port, extend or debug an RL block for a new robot, task or trainer, or to add the monitor or simulator outputs to an existing one.
+description: Build an Edge Impulse custom learning block that trains a robot policy with reinforcement learning in simulation (MuJoCo, Gymnasium, Stable-Baselines3 or another trainer), using the shared ei_rl package. Covers the block layout, the Studio contract for a block without training data, the environment contract, training on a wall-clock budget, the ONNX export of the actor, the training telemetry for the RL training monitor extension (rl-viz, the task descriptor, snapshots), the simulation bundle and live checkpoints for the RL policy simulator extension (ei-rl-sim), the sim-to-sim evaluation, the policy/ folder (checkpoint, configs, DEPLOY.md) and its download from Studio's Deployment tab (deploy_block_rl_policy), the Dockerfile, pinning, asset licenses, local tests and pushing. Use when asked to create, port, extend or debug an RL block for a new robot, task or trainer, or to add the monitor or simulator outputs to an existing one.
 ---
 
 Help the user build an Edge Impulse custom learning block that trains a robot policy by reinforcement learning.
@@ -54,11 +54,9 @@ Start from the closest existing block and replace the robot and the task, rather
 
 ## The Studio contract for RL
 
-- **No training data.** Declare `"operatesOn": "regression"`, which every Studio accepts. The project then needs
-  an impulse with an input block, **Raw data** and the block, plus a few uploaded samples so Studio starts a job;
-  the block ignores them. Where Studio supports self-contained blocks (edgeimpulse PR #16421),
-  `"operatesOn": "self_contained_freeform_output"` needs neither. Say in the description that the block needs no
-  project data.
+- **No training data.** Declare `"operatesOn": "self_contained_freeform_output"`: the impulse has only the
+  learn block, with no input or processing block, and the project needs no data. Say in the description that
+  the block needs no project data.
 - **Arguments.** Use `ei_rl.core.parser` and `parse_args` (they add `--data-directory`, `--out-directory`,
   `--custom-data-directory` and ignore unknown arguments). Every `parameters.json` entry has a matching argument
   with the same default. Values arrive as strings: give `type=` in argparse.
@@ -66,7 +64,8 @@ Start from the closest existing block and replace the robot and the task, rather
   own settings (episode length, a curriculum), parallel simulations (0 = automatic), seed; experts' settings under
   `"section": "advanced"`.
 - **Outputs** in `--out-directory`: `model.onnx`, `custom_training_metrics.json` (the Experiments tab), and any
-  file for deployment (e.g. `deploy_config.json`: the control rate, action scaling, default joint positions).
+  file for deployment (e.g. `deploy_config.json`: the control rate, action scaling, default joint positions),
+  ideally in `policy/` (see Deployment).
 - **Custom data** in `/home/custom_data` (`custom_data_directory(args, out)`, which returns `None` when it can't
   be used): the telemetry, the bundle, the checkpoints. Studio keeps it with the learn block and the extensions
   read it, even while the job runs.
@@ -308,8 +307,76 @@ Put a few headline numbers in `custom_training_metrics.json` with `write_trainin
 rate, failure rate, timesteps trained, training time), which Studio shows in the Experiments tab.
 
 **Studio samples** (optional): `write_samples` and `write_io_pairs` turn the benchmark's model inputs and outputs
-into acquisition files and an `info.labels`, so the project has samples to start a job with and to test a
-deployment against.
+into acquisition files and an `info.labels`, so the project has samples to test a deployment against.
+
+## Deployment
+
+What the robot needs besides `model.onnx` goes in a `policy/` folder, which the block writes to the out
+directory and copies to the custom data (`custom_data/policy/`, where the simulator also reads `model.onnx`):
+
+- `model.onnx`, and the trainer's checkpoint it was exported from (`model_<n>.pt`, `model.zip`), to resume,
+  fine-tune or re-export it. Only that one: the trainer's other checkpoints stay in the job's work directory,
+  which is gone after the job;
+- the configs it trained with (rsl_rl's `params/env.yaml` and `params/agent.yaml`, or the block's arguments);
+- `DEPLOY.md`, how to use this policy (below);
+- the task's code when the user wrote it in Studio's code editor (`task.py`).
+
+### DEPLOY.md
+
+Every block writes one. It is what someone who downloads the policy reads first, often without the block's
+README, so it says everything needed to go from the files to a robot. `ei_train.py` generates it at the end of
+the run, never as a static file: the task ID, the checkpoint's name, the settings and the numbers are the run's,
+so every command can be copied as it is.
+
+| Section | What it says |
+|---|---|
+| `# <task ID>` | One line: which block trained it, and with what (the robot package's recipe, the block's own task, the code editor's `task.py`) |
+| Files | Each file in `policy/`. For `model.onnx`: the observation and action (dimensions, what the output means, e.g. joint targets as `offset + scale * action`), normalization baked in, how it was verified. For the checkpoint: how to resume, fine-tune or re-export it |
+| Run it in simulation | The commands to play the policy in the robot package's own tools, with this run's task ID and checkpoint |
+| Put it on the robot | The commands to copy, publish or load it on the robot, and what the robot's runtime needs that the model doesn't carry (the control rate, action scaling, default pose, or where `deploy_config.json` says it). For an episodic task: how to start it and what it hands back to |
+| Settings changed | The Studio parameters that differ from the defaults (e.g. the reward weights: the default and the value) |
+| Evaluation | The benchmark of the exported ONNX model, the numbers in `custom_training_metrics.json` |
+
+- Read every value from the run's own objects (the task's config, the checkpoint path, the evaluation results),
+  never retype it, as for `sim.json`.
+- A placeholder only for what the block can't know, in angle brackets (`<user>/microduck-walk`), and say what
+  goes there.
+- Name the robot package's version (the commit the Dockerfile pins): the commands are that version's.
+- Keep it short and in plain Markdown; link to the robot package's README for the details rather than
+  repeating them.
+
+```python
+def write_deploy_md(policy_dir, task_id, checkpoint, trained_with, changed, metrics):
+    changes = "".join(f"- `{c['term']}`: {c['weight']:g} (default {c['default']:g})\n" for c in changed)
+    (policy_dir / "DEPLOY.md").write_text(f"""# {task_id}
+
+Trained by the Edge Impulse <robot> block with {trained_with}.
+
+- `model.onnx`: {OBS_DIM} observations -> {ACT_DIM} joint targets, normalizer baked in.
+- `{checkpoint.name}`: the checkpoint `model.onnx` was exported from.
+- `params/`: the configs it trained with.
+
+## Run it in simulation
+
+    <the robot package's play command> {task_id} --checkpoint {checkpoint.name}
+
+## Put it on the robot
+
+    <the robot's own commands, with model.onnx>
+
+""" + (f"## Settings changed\n\n{changes}\n" if changes else "") + "## Evaluation\n\n"
+        + "".join(f"- {k}: {v:.4g}\n" if isinstance(v, float) else f"- {k}: {v}\n" for k, v in metrics.items()))
+```
+
+The microduck block's `write_policy_dir()` (in its `ei_train.py`) is a complete one: it adds the commands for
+each kind of task (perpetual or episodic) and for the block's own tasks.
+
+Studio's **Deployment** tab gives a deployment block only the model and its conversions, never the custom data.
+The shared deployment block `deploy_block_rl_policy` has `mountLearnBlock` on: Studio mounts the learn block's
+folder at `/data`, and it zips the **Custom block** deployment's files with `/data/custom_data/policy/`. It
+works for any RL block that writes `custom_data/policy/`, so a block doesn't need a deployment block of its own.
+It needs an Enterprise organization and an impulse with a single learn block. Keep `policy/` small: the
+deployment zips it as it is.
 
 ## Dockerfile
 
@@ -371,7 +438,7 @@ ENTRYPOINT ["python3", "-u", "ei_train.py"]
   ```
 
   Then check `out/model.onnx`, `out/custom_training_metrics.json`, and in `out/custom_data/`: `manifest.json`
-  (status `finished`), `metrics.json`, `eval.json`, `snapshots/*.gif`, `sim/`, `checkpoints/`, `policy/model.onnx`.
+  (status `finished`), `metrics.json`, `eval.json`, `snapshots/*.gif`, `sim/`, `checkpoints/`, `policy/` (`model.onnx`, the checkpoint, `DEPLOY.md`).
 - **The monitor:** in its checkout, `DEMO_DIR=/path/to/out node server.js`, then open
   `http://localhost:8080/?demo=1`. It answers the Studio API from `out/custom_data/` and the log `out.log` (save
   the run's stdout there). See its "Run locally".
@@ -408,9 +475,9 @@ edge-impulse-blocks init    # first time only: pick the organization, writes .ei
 edge-impulse-blocks push    # Edge Impulse builds the image, including the --check step
 ```
 
-In a project: upload a few samples (unless the block is self-contained), add an input block, **Raw data** and the
-block under **Create impulse**, then train. Set the job's CPU, memory and time limits on the block in Studio after
-the push; they are not in `parameters.json`.
+In a project: add the block under **Create impulse** (it is the impulse's only block), then train. Set the job's CPU, memory and time limits on the block in Studio after
+the push; they are not in `parameters.json`. To download `policy/` from **Deployment**, push
+`deploy_block_rl_policy` to the organization once (see Deployment).
 
 ## Instructions
 
@@ -427,7 +494,9 @@ the push; they are not in `parameters.json`.
 5. Make `sim_bundle.py --check` pass and run it in the Dockerfile.
 6. Verify the ONNX export, evaluate the ONNX model on a fixed benchmark, and write the headline metrics.
 7. Pin every dependency, `ei_rl` to a commit, and check asset licenses before anything is committed.
-8. Run a short training in the image with `--network=none`, open the outputs in both extensions locally, then
+8. Write `policy/` with a `DEPLOY.md` generated for the run (see Deployment), and check it reads right for a
+   task of each kind the block trains.
+9. Run a short training in the image with `--network=none`, open the outputs in both extensions locally, then
    push.
-9. Document in the block's README: the task, the observation and action, the rewards, the randomization, what a
-   run gives at a few budgets, and the extensions' outputs.
+10. Document in the block's README: the task, the observation and action, the rewards, the randomization, what a
+    run gives at a few budgets, and the extensions' outputs.
