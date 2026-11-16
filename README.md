@@ -120,6 +120,9 @@ Another trainer gets the same outputs by calling `RLViz.start`, `log` and `finis
 The formats belong to the extensions: each extension's README is the specification of its format. This package
 implements them, and changes only when they do. A new field or file is agreed with the extension's owner first.
 
+[docs/architecture.md](docs/architecture.md) explains the whole system: the robot packages, this package, the
+learn blocks, a training job step by step, the outputs, the deployment, and how to add a task or a robot.
+
 ## Building a new block
 
 [skills/ei-build-robotics-rl-blocks](skills/ei-build-robotics-rl-blocks/SKILL.md) is a guide to building an RL block

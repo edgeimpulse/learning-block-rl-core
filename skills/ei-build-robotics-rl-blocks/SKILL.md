@@ -1,6 +1,6 @@
 ---
 name: ei-build-robotics-rl-blocks
-description: Build an Edge Impulse custom learning block that trains a robot policy with reinforcement learning in simulation (MuJoCo, Gymnasium, Stable-Baselines3 or another trainer), using the shared ei_rl package. Covers the block layout, the Studio contract for a block without training data, the environment contract, training on a wall-clock budget, the ONNX export of the actor, the training telemetry for the RL training monitor extension (rl-viz, the task descriptor, snapshots), the simulation bundle and live checkpoints for the RL policy simulator extension (ei-rl-sim), the sim-to-sim evaluation, the policy/ folder (checkpoint, configs, DEPLOY.md) and its download from Studio's Deployment tab (deploy_block_rl_policy), the Dockerfile, pinning, asset licenses, local tests and pushing. Use when asked to create, port, extend or debug an RL block for a new robot, task or trainer, or to add the monitor or simulator outputs to an existing one.
+description: Build an Edge Impulse custom learning block that trains a robot policy with reinforcement learning in simulation (MuJoCo, Gymnasium, Stable-Baselines3 or another trainer), using the shared ei_rl package. Covers the block layout, the Studio contract for a block without training data, the environment contract, training on a wall-clock budget, the ONNX export of the actor, the training telemetry for the RL training monitor extension (rl-viz, the task descriptor, snapshots), the simulation bundle and live checkpoints for the RL policy simulator extension (ei-rl-sim), the sim-to-sim evaluation, the policy/ folder (checkpoint, configs, DEPLOY.md) and its download from Studio's Deployment tab (deploy-block-rl-policy), the Dockerfile, pinning, asset licenses, local tests and pushing. Use when asked to create, port, extend or debug an RL block for a new robot, task or trainer, or to add the monitor or simulator outputs to an existing one.
 ---
 
 Help the user build an Edge Impulse custom learning block that trains a robot policy by reinforcement learning.
@@ -51,6 +51,18 @@ A typical block:
 | `requirements.txt`, `setup.sh` | A local venv with the same pins |
 
 Start from the closest existing block and replace the robot and the task, rather than from scratch.
+
+## Naming
+
+- **The block** (its repo and folder): `learning_block_rl_<robot>`, the robot's name in lowercase, one word,
+  e.g. `learning_block_rl_microduck`. Not the task or the trainer: one block trains all its robot's tasks, and
+  a new task is a task in that block, not a new block.
+- **The shared code:** `learning_block_rl_core` (this repo), Python package `ei_rl`, `ei-rl` to pip.
+- **A robot package:** `<robot>_rl` (e.g. `microduck_rl`), or the name its maker publishes it under.
+- **The deployment block:** `deploy-block-rl-policy`, one for every RL block.
+
+Every RL repo starts with `learning_block_rl_`, so the blocks and their shared code sort together. Older blocks
+named `custom_block_rl_*` take the new name when they move to `ei_rl`; ask the user before renaming a repo.
 
 ## The Studio contract for RL
 
@@ -371,8 +383,13 @@ Trained by the Edge Impulse <robot> block with {trained_with}.
 The microduck block's `write_policy_dir()` (in its `ei_train.py`) is a complete one: it adds the commands for
 each kind of task (perpetual or episodic) and for the block's own tasks.
 
+**Which deployment to pick.** For the ONNX policy only, the **Custom block** deployment type on Studio's
+**Deployment** tab is enough: its zip has `model.onnx` (and its conversions). For everything about the policy
+(the checkpoint, the configs with the reward weights changed in Studio, `DEPLOY.md`, the task's code with its
+custom reward functions when it was written in the code editor), the user needs the deployment block [deploy-block-rl-policy](https://github.com/edgeimpulse/deploy-block-rl-policy). Say so in the block's README.
+
 Studio's **Deployment** tab gives a deployment block only the model and its conversions, never the custom data.
-The shared deployment block `deploy_block_rl_policy` has `mountLearnBlock` on: Studio mounts the learn block's
+The shared deployment block has `mountLearnBlock` on: Studio mounts the learn block's
 folder at `/data`, and it zips the **Custom block** deployment's files with `/data/custom_data/policy/`. It
 works for any RL block that writes `custom_data/policy/`, so a block doesn't need a deployment block of its own.
 It needs an Enterprise organization and an impulse with a single learn block. Keep `policy/` small: the
@@ -476,14 +493,16 @@ edge-impulse-blocks push    # Edge Impulse builds the image, including the --che
 ```
 
 In a project: add the block under **Create impulse** (it is the impulse's only block), then train. Set the job's CPU, memory and time limits on the block in Studio after
-the push; they are not in `parameters.json`. To download `policy/` from **Deployment**, push
-`deploy_block_rl_policy` to the organization once (see Deployment).
+the push; they are not in `parameters.json`. For `model.onnx` alone, pick the **Custom block**
+deployment type under **Deployment**. For the whole `policy/`, push [deploy-block-rl-policy](https://github.com/edgeimpulse/deploy-block-rl-policy) to the
+organization once and pick it there (see Deployment).
 
 ## Instructions
 
 1. Ask what the robot is (its model, actuators, sensors), the task and how success and failure are defined, the
    trainer (default: Gymnasium + Stable-Baselines3 PPO on CPU), and whether a real robot will run the policy.
-   Look for an existing block with a similar robot or task to start from.
+   Look for an existing block with a similar robot or task to start from. Name the new block
+   `learning_block_rl_<robot>` (see Naming); for a new task on a robot that has a block, add it to that block.
 2. Build and test the environment on its own first (`train.py`, a short run that learns something), then wrap it
    in `ei_train.py`.
 3. Use `ei_rl` for everything it covers; don't copy its code into the block. If the block needs a change
