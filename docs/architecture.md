@@ -94,6 +94,8 @@ The base install needs only numpy and pillow. The extras: `mujoco` for the simul
 
 **The formats belong to the extensions.** The training monitor's README specifies `rl-viz` (its owner is Moe Sani), the policy simulator's README specifies `ei-rl-sim`. `ei_rl` implements both and doesn't change them: a new field or file is agreed with the extension's owner and added to the extension first. Both formats carry a `format` and a `version`. A block writes them only through `ei_rl`.
 
+**MuJoCo first.** The bundle carries the compiled MuJoCo model, and the simulator runs it with MuJoCo's own WASM build. So whatever MuJoCo models itself (sensors as `sensordata`, contacts, actuators, a scene's geoms) needs no code in the extension and stays exact across versions; the extension's own code is for what MuJoCo doesn't model (a servo's electronics, a vision module's blob detector, a firmware's mixing). Format version 2 adds MuJoCo's sensors (observations and terminations) and layouts (scenes as model rows). The extension ships MuJoCo 3.10.0, 3.15.0 and 4.0.1; a block moves to MuJoCo 4 when its framework does (the miniAuto bundles already pass the parity test on 4.0.1; mjlab 1.3.0, for the microduck, doesn't support it yet).
+
 The repo also holds the agent skill for building RL blocks ([skills/ei-build-robotics-rl-blocks](../skills/ei-build-robotics-rl-blocks/SKILL.md)).
 
 ## The learn block

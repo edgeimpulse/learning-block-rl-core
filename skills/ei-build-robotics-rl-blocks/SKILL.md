@@ -134,6 +134,16 @@ Design it for sim-to-real from the start, since the bundle has to describe all o
 
 - an observation from what the real robot senses, with its noise and delay; a privileged critic may see more
   (the true state), appended after the actor's part, so the export can slice it off;
+- the robot's sensors as **MuJoCo sensors** in the model (`gyro`, `accelerometer`, `framezaxis`, `rangefinder`,
+  `geomdist`, `touch`, ...), read from `data.sensordata`, rather than computed in Python: the bundle then carries
+  them in the `.mjb`, the simulator reads `sensordata` with no new code, and they survive a MuJoCo upgrade. Add
+  noise, delay and thresholds on top (a line sensor: a `rangefinder` per channel, compared with a distance).
+  The same goes for terminations a sensor can state (off the line: a `geomdist` over a distance). Sensors cost
+  time in every `mj_step`; if the policy reads them once per control step, disable them for the substeps
+  (`model.opt.disableflags |= mjDSBL_SENSOR`) and compute them in a final `mj_forward`;
+- a scene the training draws at random (a circuit, obstacles): move the model's geoms (`geom_pos`, `geom_quat`,
+  `geom_size`, `geom_rbound` for `mj_ray`) on the compiled model rather than recompiling, so the bundle can carry
+  a few of them as layouts;
 - actions in [-1, 1], mapped to targets the same way in training, in the bundle and on the robot;
 - the actuator model (servo, PD, the firmware's own mixing) and domain randomization (friction, masses,
   motor parameters, latency), with nominal values for the snapshots and ranges for the evaluation;
@@ -328,13 +338,19 @@ run finished.
 
 1. **Physics:** `bundle.physics_model(full_model, spec, reset=..., control=...)` compiles the scene without its
    visual-only geoms, then checks that it simulates exactly as the full model (random controls from the reset).
-   It returns the `.mjb` bytes.
+   It returns the `.mjb` bytes. It drops every geom with `contype = conaffinity = 0`, including those a sensor
+   sees (a rangefinder sees every geom, colliding or not): when sensors need them, write the env's own model
+   with `bundle.model_bytes(env.model)` instead, so geom ids also match the visual list.
 2. **Visuals:** `bundle.visual_model(full_model)` decimates the meshes into `visual.bin` and lists every visual
    geom. A mesh that may not be redistributed goes in `remote_meshes` instead (see Assets).
 3. **`describe(env, model)`:** the block's `sim.json`, read from the environment's own objects (addresses,
    gains, noise, delays, ranges), never retyped constants, so the bundle can't drift from the training. Use only
    the kinds the simulator's README lists (observation terms, signals, actions, actuators, commands,
-   randomization). A new kind is a change to the extension first.
+   randomization). A new kind is a change to the extension first. Prefer the MuJoCo-native ones (format
+   version 2): a `sensordata` signal (the sensors' `adr`, optionally `within: [lo, hi]` for a 0/1 reading), `flip`
+   noise, `terminations.sensors`, and `layouts` (each a set of model rows to write, with `initial_states[i].layout`
+   naming the one a state is on; give the visual geoms they move a `geom_id`). Set `"version": 2` when the bundle
+   uses any of them.
 
    ```python
    def describe(env, model):
@@ -384,6 +400,13 @@ def checkpoint(step, iteration, label):
 
 **One MuJoCo version.** A `.mjb` only loads in the MuJoCo version that compiled it, and the extension ships each
 version a block pins. Moving a block to a new MuJoCo means adding that version to the extension first.
+
+**MuJoCo 4.** The extension already ships 4.0.1. To move a block: pin `mujoco==4.0.1` in a test venv, run
+`sim_bundle.py --check` and the simulator's parity test, then change `requirements.txt` and retrain (a policy
+trained on 3.x usually still plays, but train on what you ship). Keep code that also runs on 3.x until then:
+build the model with `MjSpec`, use enums by name (`mujoco.mjtSensor.mjSENS_RANGEFINDER`), and set what recent
+versions require explicitly (a `rangefinder` made with `MjSpec` needs `intprm[0] = 1 << mjRAYDATA_DIST`, the
+data it outputs, in 3.15 and 4.0 alike). A block on mjlab or another framework moves when that framework supports MuJoCo 4.
 
 ## Evaluation and metrics
 
