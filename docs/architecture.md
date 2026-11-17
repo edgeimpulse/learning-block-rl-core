@@ -194,8 +194,8 @@ After a change to a task or to `studio.toml`, regenerate `parameters.json` with 
 | Block | Stack | GPU | On `ei_rl` | Robot and tasks |
 |---|---|---|---|---|
 | microduck (`learning-block-rl-microduck`) | mjlab + rsl_rl PPO | Yes | Yes, on the `ei-rl-core` branch | microduck_rl, pinned; the hop and the code editor's template in `tasks/` |
-| miniAuto (`learning-block-rl-miniauto`) | Gymnasium + SB3 PPO, self-play | No | Yes, locally; not yet committed | `miniauto_rl`, a package in the block's repo: `MiniAuto-Football-v0`; the code editor's template in `tasks/` |
-| SO-101 push cube (`custom_block_rl_so101arm_sim`) | Gymnasium + SB3 PPO | No | Not yet: its own copy of the integration | In the block (`so101_push_env.py`) |
-| Unitree Go2 walk (`custom_block_rl_unitree_sim`) | Gymnasium + SB3 PPO | No | Not yet: its own copy of the integration | In the block (`go2_env.py`), robot from MuJoCo Menagerie |
+| miniAuto (`learning-block-rl-miniauto`) | Gymnasium + SB3 PPO, self-play | No | Yes | `miniauto_rl`, a package in the block's repo: `MiniAuto-Football-v0`, `MiniAuto-LineFollow-v0`; the code editor's template in `tasks/` |
+| SO-101 push cube (`learning-block-rl-so101`) | Gymnasium + SB3 PPO | No | Yes, on the `ei-rl-core` branch | `so101_rl`, a package in the block's repo: `SO101-PushCube-v0`; the code editor's template in `tasks/` |
+| Unitree Go2 walk (`learning-block-rl-unitree-go2`) | Gymnasium + SB3 PPO, asymmetric actor-critic | No | Yes, on the `ei-rl-core` branch | `go2_rl`, a package in the block's repo: `Go2-Walk-v0`, robot from MuJoCo Menagerie; the code editor's template in `tasks/` |
 
-The SB3 blocks also write `deploy_config.json` (the control rate, the action scaling, the default joint positions), in their own code. The miniAuto block has moved its robot to a package with Gymnasium registration, and has the microduck block's Task option, reward weights and code editor; SO-101 and Go2 still have their robots and tasks inside the blocks, and moving them to packages (`so101_rl`, `go2_rl`) the same way is the next step for them.
+The SB3 blocks also write `deploy_config.json` (the control rate, the action scaling, the default joint positions), in their own code. All four have the Task option, the reward weights in Studio, the code editor and `policy/` with a `DEPLOY.md`. The SO-101 and Go2 GitHub repos still carry their old names (`custom_block_rl_so101arm_sim`, `custom_block_rl_unitree_sim`) until an admin renames them.
