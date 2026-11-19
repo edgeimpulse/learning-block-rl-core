@@ -268,12 +268,14 @@ def write_policy(out_dir, onnx_path):
 # The custom data directory is on a network share that Studio's custom-data API reads, so the extension reads
 # sim/ and the checkpoints as soon as they are written. The log only says which files belong to this run (a
 # previous run's may still be there): `[rl-sim-run]` once sim/ is written, then one `[rl-sim-checkpoint]` line
-# per checkpoint once its file is complete.
+# per checkpoint once its file is complete. Studio's log download keeps only the last 10,000 lines (Stable-Baselines3
+# alone logs ~25 per iteration), so each checkpoint line comes after the run's line again.
 
 LIVE_FORMAT = "ei-rl-sim-live"
 LIVE_RUN_PREFIX = "[rl-sim-run]"
 LIVE_CHECKPOINT_PREFIX = "[rl-sim-checkpoint]"
 CHECKPOINT_DIR = "checkpoints"
+_live_header = None  # the last `[rl-sim-run]` line, printed again with each checkpoint
 
 
 def clear_policies(out_dir):
@@ -288,7 +290,9 @@ def print_live_header(sim_dir):
     header = dict(format=LIVE_FORMAT, version=VERSION, task=spec["task"]["id"], bundle_id=spec["bundle_id"],
                   mujoco=spec["mujoco"]["version"], obs_dim=spec["observation"]["dim"],
                   action_dim=spec["action"]["dim"], sim_dir=Path(sim_dir).name, checkpoint_dir=CHECKPOINT_DIR)
-    print(f"{LIVE_RUN_PREFIX} " + json.dumps(header, separators=(",", ":")), flush=True)
+    global _live_header
+    _live_header = f"{LIVE_RUN_PREFIX} " + json.dumps(header, separators=(",", ":"))
+    print(_live_header, flush=True)
 
 
 def checkpoint_name(step):
@@ -296,7 +300,10 @@ def checkpoint_name(step):
 
 
 def print_live_checkpoint(path, step, iteration, label=None):
-    """`[rl-sim-checkpoint]`: a checkpoint is in the custom data, at checkpoint_name(step)."""
+    """`[rl-sim-checkpoint]`: a checkpoint is in the custom data, at checkpoint_name(step). After the run's
+    `[rl-sim-run]` line again, which a long log's last 10,000 lines would otherwise lose."""
+    if _live_header is not None:
+        print(_live_header, flush=True)
     line = dict(step=step, iteration=iteration, label=label, path=checkpoint_name(step), bytes=Path(path).stat().st_size)
     print(f"{LIVE_CHECKPOINT_PREFIX} " + json.dumps(line, separators=(",", ":")), flush=True)
 
