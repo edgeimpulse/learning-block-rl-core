@@ -331,3 +331,137 @@ __all__ = [
     "print_live_header", "rounded", "save_checkpoint", "uniform_noise", "visual_model", "write_bundle",
     "write_policy",
 ]
+
+
+# ----------------------------------------------------------------------------------------------------------
+# The observer hook (format version 3): the robot's own observation code, as ONNX
+# ----------------------------------------------------------------------------------------------------------
+# Some robots observe through their own code: a complementary filter on an IMU, a low-passed command, a leaky
+# integrator of the heading. That is state over time, which no observation term kind describes, so the block
+# ships the code: a torch module, exported to ONNX, that the extension runs at every policy step (see its
+# README, "Observer hook"). The module's forward takes, each float32 [1, n]:
+#   sensors      the MuJoCo sensors sim.json's observer names, concatenated, read after the step's physics
+#   last_action  the policy's last action after the action clip (zeros at reset), before the action delay
+#   state        its own state_out from the last step (zeros at reset)
+#   noise        unit draws (normal: std 1, uniform: in [-1, 1]), zeros with noise off: the graph scales them
+#   reset        1 on the call after a reset, else 0
+# and returns obs, state_out and optionally terminated ([1, 1], over 0.5: a fall). Train with the same module
+# (or check the environment against ObserverHook), so the bundle runs the code the policy learned on.
+
+OBSERVER_INPUTS = ("sensors", "last_action", "state", "noise", "reset")
+OBSERVER_NOISE = ("normal", "uniform")
+OBSERVER_OPSET = 17
+# Ops the observer graph must not have: the page draws the noise
+RANDOM_OPS = {"RandomNormal", "RandomNormalLike", "RandomUniform", "RandomUniformLike", "Multinomial", "Bernoulli"}
+
+
+def atan2(y, x):
+    """torch.atan2 for an ONNX graph. torch exports torch.atan2 as Atan(y / x) and corrections that go wrong at
+    x = -0 (atan2(1, -0) gives -pi/2, not pi/2), which a negated sensor reading of exactly 0 is: an observer
+    computing atan2(acc_z, -acc_y) hits it. This takes Atan of y / |x|, then the quadrant from x < 0 (-0 counts
+    as 0, in y too: atan2(-0, -1) is pi, where numpy says -pi), and 0 at (0, 0). Otherwise within 2.4e-7 of numpy's."""
+    import math
+
+    import torch
+    ax = torch.abs(x)
+    base = torch.atan(y / torch.where((ax == 0) & (y == 0), torch.ones_like(ax), ax))
+    return torch.where(x < 0, torch.where(y >= 0, math.pi - base, -math.pi - base), base)
+
+
+def observer_spec(model, file, sensors, state_dim, noise, obs_dim):
+    """sim.json's observer section. sensors: MuJoCo sensor names, in the order the module reads them;
+    noise: [{"dist": "normal" | "uniform", "dim", "label"}], the unit draws in the order the module takes them."""
+    for n in sensors:
+        mj_id(model, mujoco.mjtObj.mjOBJ_SENSOR, n)
+    for n in noise:
+        if n["dist"] not in OBSERVER_NOISE:
+            raise ValueError(f"observer noise {n['dist']!r}: the extension draws {OBSERVER_NOISE}")
+    return {"file": file, "sensors": list(sensors), "state_dim": int(state_dim),
+            "noise_dim": int(sum(n["dim"] for n in noise)), "noise": [dict(n) for n in noise], "obs_dim": int(obs_dim)}
+
+
+def sensor_dim(model, sensors):
+    return int(sum(model.sensor(n).dim[0] for n in sensors))
+
+
+def export_observer(module, path, sensor_dim, action_dim, state_dim, noise_dim, terminated=False, samples=256,
+                    seed=0, atol=1e-5):
+    """Export the observer module to ONNX at `path`, as the extension runs it, and check the graph: no random
+    ops, and onnxruntime gives what torch gives on random inputs, with some sensors at 0 and -0 (which catches
+    an exported torch.atan2: use ei_rl.bundle.atan2). terminated: the module returns a third output, its fall check. Returns the path."""
+    import onnx
+    import onnxruntime as ort
+    import torch
+
+    dims = dict(zip(OBSERVER_INPUTS, (sensor_dim, action_dim, state_dim, noise_dim, 1)))
+    outputs = ["obs", "state_out"] + (["terminated"] if terminated else [])
+    module = module.eval()
+    zeros = tuple(torch.zeros(1, d) for d in dims.values())
+    path = Path(path)
+    torch.onnx.export(module, zeros, str(path), opset_version=OBSERVER_OPSET, do_constant_folding=True,
+                      dynamo=False, external_data=False, input_names=list(OBSERVER_INPUTS), output_names=outputs)
+    graph = onnx.load(str(path))
+    bad = sorted({n.op_type for n in graph.graph.node} & RANDOM_OPS)
+    if bad:
+        raise ValueError(f"{path.name}: the observer graph has {bad}. Draw noise from the noise input")
+    session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    rng = np.random.default_rng(seed)
+    for i in range(samples):
+        feeds = {k: rng.normal(0, 1, (1, d)).astype(np.float32) for k, d in dims.items()}
+        feeds["reset"][:] = float(i % 8 == 0)
+        if i % 4 == 1:  # readings of exactly 0 and -0: where torch's atan2 export goes wrong
+            feeds["sensors"][0, rng.random(sensor_dim) < 0.5] = 0.0
+            feeds["sensors"][0, rng.random(sensor_dim) < 0.5] = -0.0
+        with torch.no_grad():
+            want = module(*(torch.from_numpy(feeds[k]) for k in OBSERVER_INPUTS))
+        got = session.run(outputs, feeds)
+        for name, w, g in zip(outputs, want, got):
+            w = w.numpy()
+            if g.shape != w.shape or not np.allclose(g, w, atol=atol, rtol=1e-5):
+                raise ValueError(f"{path.name}: ONNX {name} differs from torch (max {np.max(np.abs(g - w)):.3g}) on "
+                                 f"{ {k: v.tolist() for k, v in feeds.items()} }")
+    return path
+
+
+class ObserverHook:
+    """The observer graph as the extension runs it, for a block's reference engine and its --check: reset() at an
+    episode's start (after the start state is set and forwarded), step() after each policy step's physics.
+    Both read the sensors from `data` and return the observation; `terminated` holds the graph's fall check."""
+
+    def __init__(self, model, spec, path):
+        import onnxruntime as ort
+        self.spec = spec
+        self.session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        self.outputs = [o.name for o in self.session.get_outputs()]
+        self.slices = [slice(model.sensor(n).adr[0], model.sensor(n).adr[0] + model.sensor(n).dim[0])
+                       for n in spec["sensors"]]
+        self.state = np.zeros(spec["state_dim"], np.float32)
+        self.terminated = False
+
+    def noise(self, rng):
+        """Unit draws as the extension makes them (any rng with normal and uniform)."""
+        return np.concatenate([rng.normal(0, 1, n["dim"]) if n["dist"] == "normal" else rng.uniform(-1, 1, n["dim"])
+                               for n in self.spec["noise"]] or [np.zeros(0)]).astype(np.float32)
+
+    def reset(self, data, action_dim, noise=None):
+        self.state = np.zeros(self.spec["state_dim"], np.float32)
+        return self._run(data, np.zeros(action_dim), noise, 1.0)
+
+    def step(self, data, last_action, noise=None):
+        return self._run(data, last_action, noise, 0.0)
+
+    def _run(self, data, last_action, noise, reset):
+        sd = data.sensordata
+        feeds = {"sensors": np.concatenate([sd[s] for s in self.slices]).astype(np.float32)[None],
+                 "last_action": np.asarray(last_action, np.float32)[None],
+                 "state": self.state[None],
+                 "noise": (np.zeros(self.spec["noise_dim"], np.float32) if noise is None
+                           else np.asarray(noise, np.float32))[None],
+                 "reset": np.array([[reset]], np.float32)}
+        out = dict(zip(self.outputs, self.session.run(self.outputs, feeds)))
+        self.state = out["state_out"][0]
+        self.terminated = bool("terminated" in out and out["terminated"][0, 0] > 0.5)
+        obs = out["obs"][0]
+        if obs.shape[0] != self.spec["obs_dim"]:
+            raise ValueError(f"the observer returned {obs.shape[0]} values, sim.json says obs_dim {self.spec['obs_dim']}")
+        return obs
