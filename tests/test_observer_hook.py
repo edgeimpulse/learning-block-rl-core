@@ -72,6 +72,12 @@ class ObserverHookTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             bundle.observer_spec(self.model, "o.onnx", ["nope"], 2, 4)
 
+    def test_bundle_ships_the_graph(self):
+        path = self.export(Filter())
+        spec = {"observer": bundle.observer_spec(self.model, path.name, ["acc", "gyro"], 2, 4)}
+        sim = bundle.write_bundle(self.dir / "out", spec, b"mjb", b"vis", {}, files={path.name: path.read_bytes()})
+        self.assertEqual((sim / path.name).read_bytes(), path.read_bytes())
+
     def test_hook_runs_like_the_module(self):
         path = self.export(Filter())
         spec = bundle.observer_spec(self.model, path.name, ["acc", "gyro"], 2, 4)

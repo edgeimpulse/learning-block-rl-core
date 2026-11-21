@@ -230,11 +230,12 @@ def bundle_id(spec, mjb, vis_bin):
     return h.hexdigest()[:32]
 
 
-def write_bundle(out_dir, spec, mjb, vis_bin, visual):
+def write_bundle(out_dir, spec, mjb, vis_bin, visual, files=None):
     """Write <out_dir>/sim/: sim.json (`spec`, plus its visual and bundle_id), scene.mjb.gz, visual.bin.gz.
     Returns the sim directory.
 
     visual: sim.json's visual section (visual_model's description, plus e.g. remote_meshes).
+    files: more files for sim/, name -> bytes (the observer hook's graph).
     """
     spec["visual"] = {"file": "visual.bin.gz", **visual}
     spec["bundle_id"] = bundle_id(spec, mjb, vis_bin)
@@ -246,6 +247,8 @@ def write_bundle(out_dir, spec, mjb, vis_bin, visual):
     tmp.mkdir(parents=True)
     (tmp / "scene.mjb.gz").write_bytes(gzip.compress(mjb, 9, mtime=0))
     (tmp / "visual.bin.gz").write_bytes(gzip.compress(vis_bin, 9, mtime=0))
+    for name, data in (files or {}).items():
+        (tmp / name).write_bytes(data)
     (tmp / "sim.json").write_text(json.dumps(spec, indent=1))
     shutil.rmtree(sim, ignore_errors=True)
     tmp.rename(sim)
@@ -327,10 +330,10 @@ def save_checkpoint(out_dir, step, iteration, label, export, live=True):
 
 
 __all__ = [
-    "CHECKPOINT_DIR", "FORMAT", "LIVE_FORMAT", "SIM_DIR", "VERSION", "bundle_id", "checkpoint_name", "clear_policies",
-    "cluster_mesh", "load_model", "mj_id", "model_bytes", "physics_model", "print_live_checkpoint",
-    "print_live_header", "rounded", "save_checkpoint", "uniform_noise", "visual_model", "write_bundle",
-    "write_policy", "atan2", "export_observer", "observer_spec", "ObserverHook",
+    "CHECKPOINT_DIR", "FORMAT", "LIVE_FORMAT", "SIM_DIR", "VERSION", "ObserverHook", "atan2", "bundle_id",
+    "checkpoint_name", "clear_policies", "cluster_mesh", "export_observer", "load_model", "mj_id", "model_bytes",
+    "observer_spec", "physics_model", "print_live_checkpoint", "print_live_header", "rounded", "save_checkpoint",
+    "uniform_noise", "visual_model", "write_bundle", "write_policy",
 ]
 
 
