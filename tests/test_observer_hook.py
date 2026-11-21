@@ -25,22 +25,22 @@ MJCF = """<mujoco><option timestep="0.005"/><worldbody><geom type="plane" size="
 
 if torch is not None:
     class Filter(torch.nn.Module):
-        """A complementary filter on the accelerometer's pitch, the kind of observer a balancer runs."""
+        """A complementary filter on the accelerometer's pitch, started from it: state = [pitch, started]."""
 
         def __init__(self, atan=None):
             super().__init__()
             self.atan = atan or bundle.atan2
 
-        def forward(self, sensors, last_action, state, noise, reset):
+        def forward(self, sensors, last_action, state):
             acc_pitch = self.atan(sensors[:, 2:3], -sensors[:, 1:2])
-            pitch = torch.where(reset > 0.5, acc_pitch, 0.99 * (state + sensors[:, 3:4] * 0.005) + 0.01 * acc_pitch)
-            obs = torch.cat([pitch + 0.01 * noise, sensors[:, 3:4], last_action], dim=1)
-            return obs, pitch
+            pitch = 0.99 * (state[:, 0:1] + sensors[:, 3:4] * 0.005) + 0.01 * acc_pitch
+            pitch = torch.where(state[:, 1:2] > 0.5, pitch, acc_pitch)
+            return torch.cat([pitch, sensors[:, 3:4], last_action], dim=1), torch.cat([pitch, torch.ones_like(pitch)], 1)
 
     class Noisy(Filter):
-        def forward(self, sensors, last_action, state, noise, reset):
-            obs, pitch = super().forward(sensors, last_action, state, noise, reset)
-            return obs + torch.randn_like(obs), pitch
+        def forward(self, sensors, last_action, state):
+            obs, state = super().forward(sensors, last_action, state)
+            return obs + torch.randn_like(obs), state
 
 
 @unittest.skipIf(torch is None, "needs mujoco, torch, onnx and onnxruntime")
@@ -50,8 +50,7 @@ class ObserverHookTest(unittest.TestCase):
         self.model = mujoco.MjModel.from_xml_string(MJCF)
 
     def export(self, module):
-        return bundle.export_observer(module, self.dir / "observer.onnx", sensor_dim=6, action_dim=2, state_dim=1,
-                                      noise_dim=1)
+        return bundle.export_observer(module, self.dir / "observer.onnx", sensor_dim=6, action_dim=2, state_dim=2)
 
     def test_atan2_matches_numpy(self):
         v = [0.0, -0.0, 1.0, -1.0, 0.3, -2.5, 1e-8]
@@ -68,33 +67,27 @@ class ObserverHookTest(unittest.TestCase):
             self.export(Noisy())
 
     def test_spec(self):
-        spec = bundle.observer_spec(self.model, "observer.onnx", ["acc", "gyro"], 1,
-                                    [{"dist": "normal", "dim": 1, "label": "pitch"}], 4)
-        self.assertEqual((spec["noise_dim"], bundle.sensor_dim(self.model, spec["sensors"])), (1, 6))
+        spec = bundle.observer_spec(self.model, "observer.onnx", ["acc", "gyro"], 2, 4)
+        self.assertEqual(spec, {"file": "observer.onnx", "sensors": ["acc", "gyro"], "state_dim": 2, "obs_dim": 4})
         with self.assertRaises(KeyError):
-            bundle.observer_spec(self.model, "o.onnx", ["nope"], 1, [], 4)
-        with self.assertRaises(ValueError):
-            bundle.observer_spec(self.model, "o.onnx", ["acc"], 1, [{"dist": "flip", "dim": 1}], 4)
+            bundle.observer_spec(self.model, "o.onnx", ["nope"], 2, 4)
 
     def test_hook_runs_like_the_module(self):
         path = self.export(Filter())
-        spec = bundle.observer_spec(self.model, path.name, ["acc", "gyro"], 1,
-                                    [{"dist": "normal", "dim": 1, "label": "pitch"}], 4)
+        spec = bundle.observer_spec(self.model, path.name, ["acc", "gyro"], 2, 4)
         hook, module = bundle.ObserverHook(self.model, spec, path), Filter()
         data = mujoco.MjData(self.model)
         mujoco.mj_forward(self.model, data)
         rng = np.random.default_rng(0)
-        state, action = torch.zeros(1, 1), np.zeros(2)
+        state, action = torch.zeros(1, 2), np.zeros(2)
         for i in range(50):
-            noise = hook.noise(rng)
-            obs = hook.reset(data, 2, noise) if i == 0 else hook.step(data, action, noise)
+            obs = hook.reset(data, 2) if i == 0 else hook.step(data, action)
             sensors = torch.tensor(data.sensordata, dtype=torch.float32)[None]
-            want, state = module(sensors, torch.tensor(action, dtype=torch.float32)[None], state,
-                                    torch.from_numpy(noise)[None], torch.tensor([[float(i == 0)]]))
+            want, state = module(sensors, torch.tensor(action, dtype=torch.float32)[None], state)
             np.testing.assert_allclose(obs, want[0].detach().numpy(), atol=1e-5)
             action = rng.uniform(-1, 1, 2)
             mujoco.mj_step(self.model, data)
-        self.assertAlmostEqual(float(hook.state[0]), float(state[0, 0]), places=5)
+        np.testing.assert_allclose(hook.state, state[0].numpy(), atol=1e-5)
 
 
 if __name__ == "__main__":

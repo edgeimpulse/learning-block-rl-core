@@ -353,18 +353,12 @@ run finished.
    uses any of them.
 
    **Observation code (format version 3).** When the robot observes through its own code (a complementary
-   filter, a low-passed command, a heading integrator: state over time), don't add a term kind: write that code
-   once as a torch module and ship it as the bundle's **observer hook** (`sim.json` `observer`, terms of kind
-   `observer`, `"version": 3`). The simulator's README has the contract (inputs `sensors`, `last_action`,
-   `state`, `noise`, `reset`; outputs `obs`, `state_out`, optional `terminated`). `bundle.export_observer`
-   exports it and checks the ONNX against torch, `bundle.observer_spec` writes the section, and
-   `bundle.ObserverHook` runs it for the `--check`. In the module, use `bundle.atan2`, never `torch.atan2`
-   (its export is wrong at x = -0), take noise from the `noise` input (unit draws the page makes), and use
-   `torch.where`, not `if`. Describe the rest generically too, in sim.json, not in the extension: a duty-cycle
-   motor driver is a `position` actuator with `target_noise`, `target_clip`, `deadband`; motor gain spread is
-   `actuator_gainprm_scale`; random pushes are `disturbances` (`body_force`, `dof_torque`); a fall around a
-   trim angle is `terminations.angle`, drift `max_drift_m`; a per-episode action delay `action.delay_steps:
-   [lo, hi]`.
+   filter, a low-passed command: state over time), don't add a term kind: write that code once as a torch
+   module and ship it as the bundle's **observer hook** (`sim.json` `observer`, terms of kind `observer`,
+   `"version": 3`; the simulator's README has the contract). `bundle.export_observer` exports and checks it,
+   `bundle.observer_spec` writes the section, `bundle.ObserverHook` runs it in the reference engine. Use
+   `bundle.atan2`, never `torch.atan2` (its export is wrong at x = -0), and `torch.where`, not `if`. Keep
+   sensor noise on the terms (`noise`) and falls in `terminations` (`sensors` with `reason: "fell"`).
 
    ```python
    def describe(env, model):
