@@ -20,6 +20,7 @@ observation, terminations, randomization, initial states) and keeps a reference 
 import gzip
 import hashlib
 import json
+import math
 import shutil
 import tempfile
 from pathlib import Path
@@ -229,11 +230,12 @@ def bundle_id(spec, mjb, vis_bin):
     return h.hexdigest()[:32]
 
 
-def write_bundle(out_dir, spec, mjb, vis_bin, visual):
+def write_bundle(out_dir, spec, mjb, vis_bin, visual, files=None):
     """Write <out_dir>/sim/: sim.json (`spec`, plus its visual and bundle_id), scene.mjb.gz, visual.bin.gz.
     Returns the sim directory.
 
     visual: sim.json's visual section (visual_model's description, plus e.g. remote_meshes).
+    files: more files for sim/, name -> bytes (the observer hook's graph).
     """
     spec["visual"] = {"file": "visual.bin.gz", **visual}
     spec["bundle_id"] = bundle_id(spec, mjb, vis_bin)
@@ -245,6 +247,8 @@ def write_bundle(out_dir, spec, mjb, vis_bin, visual):
     tmp.mkdir(parents=True)
     (tmp / "scene.mjb.gz").write_bytes(gzip.compress(mjb, 9, mtime=0))
     (tmp / "visual.bin.gz").write_bytes(gzip.compress(vis_bin, 9, mtime=0))
+    for name, data in (files or {}).items():
+        (tmp / name).write_bytes(data)
     (tmp / "sim.json").write_text(json.dumps(spec, indent=1))
     shutil.rmtree(sim, ignore_errors=True)
     tmp.rename(sim)
@@ -326,8 +330,97 @@ def save_checkpoint(out_dir, step, iteration, label, export, live=True):
 
 
 __all__ = [
-    "CHECKPOINT_DIR", "FORMAT", "LIVE_FORMAT", "SIM_DIR", "VERSION", "bundle_id", "checkpoint_name", "clear_policies",
-    "cluster_mesh", "load_model", "mj_id", "model_bytes", "physics_model", "print_live_checkpoint",
-    "print_live_header", "rounded", "save_checkpoint", "uniform_noise", "visual_model", "write_bundle",
-    "write_policy",
+    "CHECKPOINT_DIR", "FORMAT", "LIVE_FORMAT", "SIM_DIR", "VERSION", "ObserverHook", "atan2", "bundle_id",
+    "checkpoint_name", "clear_policies", "cluster_mesh", "export_observer", "load_model", "mj_id", "model_bytes",
+    "observer_spec", "physics_model", "print_live_checkpoint", "print_live_header", "rounded", "save_checkpoint",
+    "uniform_noise", "visual_model", "write_bundle", "write_policy",
 ]
+
+
+# ----------------------------------------------------------------------------------------------------------
+# The observer hook (format version 3): the robot's own observation code as an ONNX graph. The extension's
+# README ("Observer hook") has the contract: inputs sensors, last_action, state; outputs obs, state_out.
+# ----------------------------------------------------------------------------------------------------------
+
+OBSERVER_INPUTS = ("sensors", "last_action", "state")
+OBSERVER_OUTPUTS = ("obs", "state_out")
+OBSERVER_OPSET = 17
+RANDOM_OPS = {"RandomNormal", "RandomNormalLike", "RandomUniform", "RandomUniformLike", "Multinomial", "Bernoulli"}
+
+
+def atan2(y, x):
+    """torch.atan2 for an ONNX graph: torch's own export is wrong at x = -0 (atan2(1, -0) gives -pi/2). Here -0
+    counts as 0, in y too, and (0, 0) gives 0; otherwise within 2.4e-7 of numpy."""
+    import torch
+    ax = torch.abs(x)
+    base = torch.atan(y / torch.where((ax == 0) & (y == 0), torch.ones_like(ax), ax))
+    return torch.where(x < 0, torch.where(y >= 0, math.pi - base, -math.pi - base), base)
+
+
+def observer_spec(model, file, sensors, state_dim, obs_dim):
+    """sim.json's observer section. sensors: MuJoCo sensor names, in the order the module reads them."""
+    for n in sensors:
+        mj_id(model, mujoco.mjtObj.mjOBJ_SENSOR, n)
+    return {"file": file, "sensors": list(sensors), "state_dim": int(state_dim), "obs_dim": int(obs_dim)}
+
+
+def export_observer(module, path, sensor_dim, action_dim, state_dim, samples=256, seed=0, atol=1e-5):
+    """Export the observer module to ONNX at `path` and check it: no random ops, and onnxruntime matches torch
+    on random inputs, some sensors at 0 and -0 (which catches an exported torch.atan2). Returns the path."""
+    import onnx
+    import onnxruntime as ort
+    import torch
+
+    dims = dict(zip(OBSERVER_INPUTS, (sensor_dim, action_dim, state_dim)))
+    module = module.eval()
+    path = Path(path)
+    torch.onnx.export(module, tuple(torch.zeros(1, d) for d in dims.values()), str(path),
+                      opset_version=OBSERVER_OPSET, dynamo=False, external_data=False,
+                      input_names=list(OBSERVER_INPUTS), output_names=list(OBSERVER_OUTPUTS))
+    bad = sorted({n.op_type for n in onnx.load(str(path)).graph.node} & RANDOM_OPS)
+    if bad:
+        raise ValueError(f"{path.name}: the observer graph has {bad}: it must be deterministic")
+    session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    rng = np.random.default_rng(seed)
+    for i in range(samples):
+        feeds = {k: rng.normal(0, 1, (1, d)).astype(np.float32) for k, d in dims.items()}
+        if i % 4 == 1:
+            feeds["sensors"][0, rng.random(sensor_dim) < 0.5] = 0.0
+            feeds["sensors"][0, rng.random(sensor_dim) < 0.5] = -0.0
+        if i % 8 == 0:
+            feeds["state"][:] = 0.0  # as at a reset
+        with torch.no_grad():
+            want = module(*(torch.from_numpy(feeds[k]) for k in OBSERVER_INPUTS))
+        for name, w, g in zip(OBSERVER_OUTPUTS, want, session.run(list(OBSERVER_OUTPUTS), feeds)):
+            w = w.numpy()
+            if g.shape != w.shape or not np.allclose(g, w, atol=atol, rtol=1e-5):
+                raise ValueError(f"{path.name}: ONNX {name} differs from torch (max {np.max(np.abs(g - w)):.3g}) on "
+                                 f"{ {k: v.tolist() for k, v in feeds.items()} }")
+    return path
+
+
+class ObserverHook:
+    """The observer graph as the extension runs it, for a block's reference engine: reset() once the start
+    state is forwarded, step(data, action) after each policy step's physics. Both return the observation."""
+
+    def __init__(self, model, spec, path):
+        import onnxruntime as ort
+        self.spec = spec
+        self.session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        self.slices = [slice(model.sensor(n).adr[0], model.sensor(n).adr[0] + model.sensor(n).dim[0])
+                       for n in spec["sensors"]]
+        self.state = np.zeros(spec["state_dim"], np.float32)
+
+    def reset(self, data, action_dim):
+        self.state = np.zeros(self.spec["state_dim"], np.float32)
+        return self.step(data, np.zeros(action_dim))
+
+    def step(self, data, action):
+        sd = data.sensordata
+        feeds = {"sensors": np.concatenate([sd[s] for s in self.slices]).astype(np.float32)[None],
+                 "last_action": np.asarray(action, np.float32)[None], "state": self.state[None]}
+        obs, state = self.session.run(list(OBSERVER_OUTPUTS), feeds)
+        self.state = state[0]
+        if obs.shape[1] != self.spec["obs_dim"]:
+            raise ValueError(f"the observer returned {obs.shape[1]} values, sim.json says obs_dim {self.spec['obs_dim']}")
+        return obs[0]

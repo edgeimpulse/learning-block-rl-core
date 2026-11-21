@@ -352,6 +352,14 @@ run finished.
    naming the one a state is on; give the visual geoms they move a `geom_id`). Set `"version": 2` when the bundle
    uses any of them.
 
+   **Observation code (format version 3).** When the robot observes through its own code (a complementary
+   filter, a low-passed command: state over time), don't add a term kind: write that code once as a torch
+   module and ship it as the bundle's **observer hook** (`sim.json` `observer`, terms of kind `observer`,
+   `"version": 3`; the simulator's README has the contract). `bundle.export_observer` exports and checks it,
+   `bundle.observer_spec` writes the section, `bundle.ObserverHook` runs it in the reference engine. Use
+   `bundle.atan2`, never `torch.atan2` (its export is wrong at x = -0), and `torch.where`, not `if`. Keep
+   sensor noise on the terms (`noise`) and falls in `terminations` (`sensors` with `reason: "fell"`).
+
    ```python
    def describe(env, model):
        return {
