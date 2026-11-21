@@ -345,7 +345,8 @@ __all__ = [
 #   state        its own state_out from the last step (zeros at reset)
 #   noise        unit draws (normal: std 1, uniform: in [-1, 1]), zeros with noise off: the graph scales them
 #   reset        1 on the call after a reset, else 0
-# and returns obs, state_out and optionally terminated ([1, 1], over 0.5: a fall). Train with the same module
+# and returns obs and state_out. Falls stay in sim.json's terminations (for one about a trim: a framezaxis
+# sensor on a turned site, in terminations.sensors). Train with the same module
 # (or check the environment against ObserverHook), so the bundle runs the code the policy learned on.
 
 OBSERVER_INPUTS = ("sensors", "last_action", "state", "noise", "reset")
@@ -384,17 +385,16 @@ def sensor_dim(model, sensors):
     return int(sum(model.sensor(n).dim[0] for n in sensors))
 
 
-def export_observer(module, path, sensor_dim, action_dim, state_dim, noise_dim, terminated=False, samples=256,
-                    seed=0, atol=1e-5):
+def export_observer(module, path, sensor_dim, action_dim, state_dim, noise_dim, samples=256, seed=0, atol=1e-5):
     """Export the observer module to ONNX at `path`, as the extension runs it, and check the graph: no random
     ops, and onnxruntime gives what torch gives on random inputs, with some sensors at 0 and -0 (which catches
-    an exported torch.atan2: use ei_rl.bundle.atan2). terminated: the module returns a third output, its fall check. Returns the path."""
+    an exported torch.atan2: use ei_rl.bundle.atan2). Returns the path."""
     import onnx
     import onnxruntime as ort
     import torch
 
     dims = dict(zip(OBSERVER_INPUTS, (sensor_dim, action_dim, state_dim, noise_dim, 1)))
-    outputs = ["obs", "state_out"] + (["terminated"] if terminated else [])
+    outputs = ["obs", "state_out"]
     module = module.eval()
     zeros = tuple(torch.zeros(1, d) for d in dims.values())
     path = Path(path)
@@ -426,17 +426,16 @@ def export_observer(module, path, sensor_dim, action_dim, state_dim, noise_dim, 
 class ObserverHook:
     """The observer graph as the extension runs it, for a block's reference engine and its --check: reset() at an
     episode's start (after the start state is set and forwarded), step() after each policy step's physics.
-    Both read the sensors from `data` and return the observation; `terminated` holds the graph's fall check."""
+    Both read the sensors from `data` and return the observation."""
 
     def __init__(self, model, spec, path):
         import onnxruntime as ort
         self.spec = spec
         self.session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-        self.outputs = [o.name for o in self.session.get_outputs()]
+        self.outputs = ["obs", "state_out"]
         self.slices = [slice(model.sensor(n).adr[0], model.sensor(n).adr[0] + model.sensor(n).dim[0])
                        for n in spec["sensors"]]
         self.state = np.zeros(spec["state_dim"], np.float32)
-        self.terminated = False
 
     def noise(self, rng):
         """Unit draws as the extension makes them (any rng with normal and uniform)."""
@@ -460,7 +459,6 @@ class ObserverHook:
                  "reset": np.array([[reset]], np.float32)}
         out = dict(zip(self.outputs, self.session.run(self.outputs, feeds)))
         self.state = out["state_out"][0]
-        self.terminated = bool("terminated" in out and out["terminated"][0, 0] > 0.5)
         obs = out["obs"][0]
         if obs.shape[0] != self.spec["obs_dim"]:
             raise ValueError(f"the observer returned {obs.shape[0]} values, sim.json says obs_dim {self.spec['obs_dim']}")

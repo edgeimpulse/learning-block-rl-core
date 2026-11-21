@@ -3,7 +3,6 @@
 
 """The observer hook helpers in ei_rl.bundle: the export check and the reference runner."""
 
-import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,12 +35,12 @@ if torch is not None:
             acc_pitch = self.atan(sensors[:, 2:3], -sensors[:, 1:2])
             pitch = torch.where(reset > 0.5, acc_pitch, 0.99 * (state + sensors[:, 3:4] * 0.005) + 0.01 * acc_pitch)
             obs = torch.cat([pitch + 0.01 * noise, sensors[:, 3:4], last_action], dim=1)
-            return obs, pitch, (torch.abs(pitch - math.pi / 2) > 0.5).to(torch.float32)
+            return obs, pitch
 
     class Noisy(Filter):
         def forward(self, sensors, last_action, state, noise, reset):
-            obs, pitch, t = super().forward(sensors, last_action, state, noise, reset)
-            return obs + torch.randn_like(obs), pitch, t
+            obs, pitch = super().forward(sensors, last_action, state, noise, reset)
+            return obs + torch.randn_like(obs), pitch
 
 
 @unittest.skipIf(torch is None, "needs mujoco, torch, onnx and onnxruntime")
@@ -52,7 +51,7 @@ class ObserverHookTest(unittest.TestCase):
 
     def export(self, module):
         return bundle.export_observer(module, self.dir / "observer.onnx", sensor_dim=6, action_dim=2, state_dim=1,
-                                      noise_dim=1, terminated=True)
+                                      noise_dim=1)
 
     def test_atan2_matches_numpy(self):
         v = [0.0, -0.0, 1.0, -1.0, 0.3, -2.5, 1e-8]
@@ -90,10 +89,9 @@ class ObserverHookTest(unittest.TestCase):
             noise = hook.noise(rng)
             obs = hook.reset(data, 2, noise) if i == 0 else hook.step(data, action, noise)
             sensors = torch.tensor(data.sensordata, dtype=torch.float32)[None]
-            want, state, t = module(sensors, torch.tensor(action, dtype=torch.float32)[None], state,
+            want, state = module(sensors, torch.tensor(action, dtype=torch.float32)[None], state,
                                     torch.from_numpy(noise)[None], torch.tensor([[float(i == 0)]]))
             np.testing.assert_allclose(obs, want[0].detach().numpy(), atol=1e-5)
-            self.assertEqual(hook.terminated, bool(t[0, 0] > 0.5))
             action = rng.uniform(-1, 1, 2)
             mujoco.mj_step(self.model, data)
         self.assertAlmostEqual(float(hook.state[0]), float(state[0, 0]), places=5)
