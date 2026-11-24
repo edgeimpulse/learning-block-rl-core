@@ -78,8 +78,10 @@ class Host:
 
     def metrics(self):
         out = list(self.task.metrics(self.sim))
-        for r in self.robots.values():
-            out += r.metrics(self.sim)
+        labels = {a["name"]: a["label"] for a in self.task.agents}
+        for n, r in self.robots.items():
+            for m in r.metrics(self.sim):  # each robot's, under its name when there are several
+                out.append(dict(m, label=f"{labels[n]} {m['label'][:1].lower()}{m['label'][1:]}") if len(self.robots) > 1 else m)
         return out
 
     def markers(self):
