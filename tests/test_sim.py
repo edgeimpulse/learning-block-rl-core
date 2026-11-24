@@ -110,6 +110,7 @@ class BundleTest(unittest.TestCase):
         self.assertEqual((spec["version"], spec["observation"]["dim"], spec["action"]["dim"]), (3, 4, 1))
         self.assertEqual(spec["python"]["task"], "toy_sim.env:Rail")
         self.assertEqual([s["name"] for s in spec["settings"]], ["lag_s"])
+        self.assertEqual((spec["camera"]["track_body_id"], spec["layout"]), (1, ["rail"]))
         with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()):
             sim_dir = bundle.write_bundle(d, spec, bundle.model_bytes(model), b"", {},
                                           bundle.python_files(Rail, Cart))

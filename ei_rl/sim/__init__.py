@@ -167,6 +167,14 @@ def metric(label, value, unit=None, chart=True, low=None):
     return dict(label=label, value=float(value), unit=unit, chart=chart, low=low)
 
 
+def camera(distance=1.0, elevation_deg=-20.0, azimuth_deg=135.0, lookat=(0.0, 0.0, 0.1), track=None):
+    """Where the extension's viewer starts: `distance` (m) from what it looks at, `elevation_deg` below the
+    horizon (< 0), `azimuth_deg` around z from +x (MuJoCo's convention). It looks at `lookat` (world, m), or
+    follows the body named `track` (the user can turn following off)."""
+    return dict(distance=float(distance), elevation_deg=float(elevation_deg), azimuth_deg=float(azimuth_deg),
+                lookat=[float(v) for v in lookat], track=track)
+
+
 def arrow(pos, vec, rgba=(1.0, 0.8, 0.1, 1.0), label=None):
     """A marker: an arrow from pos (world, m) along vec."""
     return dict(kind="arrow", pos=[float(v) for v in pos], vec=[float(v) for v in vec], rgba=list(rgba), label=label)
@@ -228,6 +236,10 @@ class Task:
                         None: the task draws one)
     forward_after_step  False: observe right after mj_step, one physics step behind the positions, as some
                         trainers do
+    camera              camera(...): the viewer's start; None: the default
+    layout              names of the geoms whose model fields (geom_pos, geom_quat, geom_size, geom_rgba) reset
+                        changes, a scene with several layouts (a circuit per start state): the viewer redraws
+                        them after each reset
     """
 
     id = None
@@ -239,6 +251,8 @@ class Task:
     settings = []
     states = []
     forward_after_step = True
+    camera = None
+    layout = []
 
     def __init__(self, sim):
         self.command_values = {c["name"]: np.array(c["default"], np.float64) for c in self.commands}
@@ -278,4 +292,4 @@ class Task:
 
 
 __all__ = ["CONTRACT_VERSION", "DATA_FIELDS", "MODEL_FIELDS", "MODEL_SIZES", "OBJECT_KINDS", "WRITABLE_DATA",
-           "Robot", "Sim", "Task", "agent", "arrow", "command", "done", "metric", "point", "setting"]
+           "Robot", "Sim", "Task", "agent", "arrow", "camera", "command", "done", "metric", "point", "setting"]

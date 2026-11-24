@@ -19,5 +19,6 @@ from toy_sim.env import Rail  # noqa: E402
 from toy_sim.robot import Cart  # noqa: E402
 
 m = mujoco.MjModel.from_xml_string(XML)
-bundle.write_bundle(sys.argv[1], bundle.task_spec(Rail, Cart, m), bundle.model_bytes(m), b"", {},
+vis_bin, visual = bundle.visual_model(m)
+bundle.write_bundle(sys.argv[1], bundle.task_spec(Rail, Cart, m), bundle.model_bytes(m), vis_bin, visual,
                     bundle.python_files(Rail, Cart))

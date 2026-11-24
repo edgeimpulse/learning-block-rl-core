@@ -1,6 +1,6 @@
 import numpy as np
 
-from ei_rl.sim import Task, command, done, metric, point
+from ei_rl.sim import Task, camera, command, done, metric, point
 
 from .robot import Cart  # noqa: F401  (a local import, which the bundle follows)
 
@@ -12,15 +12,19 @@ class Rail(Task):
     episode_s = 2.0
     commands = [command("target", 1, -0.8, 0.8, 0.5, "Target", axes=["x"])]
     states = ["left", "right"]
+    camera = camera(2.5, -15, 90, track="cart")
+    layout = ["rail"]  # its colour shows the start state
 
     def __init__(self, sim):
         super().__init__(sim)
         self.q = sim.model.jnt_qposadr[sim.id("joint", "slide")]
         self.tip = sim.id("site", "tip")
+        self.rail = sim.id("geom", "rail")
 
     def reset(self, sim, rng, state=None):
         state = rng.integers(len(self.states)) if state is None else state
         sim.data.qpos[self.q] = (-0.5, 0.5)[state] + rng.uniform(-0.05, 0.05)
+        sim.model.geom_rgba[self.rail] = ((0.3, 0.3, 0.8, 1), (0.8, 0.3, 0.3, 1))[state]
         self.prev = None
 
     def after_step(self, sim):

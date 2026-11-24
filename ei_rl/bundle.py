@@ -366,7 +366,7 @@ def task_spec(task_cls, robot_cls, model):
     """sim.json for a task and its robot on a model (the physics model, as written): the entry points, the
     timing, what the extension's controls are, the policy's input and output sizes. Runs the task once (a
     reset and a step, without noise or randomization) to check it and to measure its observation."""
-    from .sim import CONTRACT_VERSION
+    from .sim import CONTRACT_VERSION, camera
     from .sim.native import Host, check_fields
     host = Host(model, task_cls, robot_cls, dict(noise=False, randomize=False))
     check_fields(host.model, host.data)
@@ -375,6 +375,11 @@ def task_spec(task_cls, robot_cls, model):
     task = host.task
     dims = {n: int(np.size(o)) for n, o in obs.items()}
     entry = lambda c: f"{c.__module__}:{c.__qualname__}"  # noqa: E731
+    cam = dict(camera() if task.camera is None else task.camera)
+    track = cam.pop("track")
+    cam["track_body_id"] = None if track is None else host.sim.id("body", track)
+    for g in task.layout:
+        host.sim.id("geom", g)  # each must be in the model
     return dict(
         format=FORMAT, version=VERSION,
         task=dict(id=task.id, label=task.label),
@@ -383,7 +388,7 @@ def task_spec(task_cls, robot_cls, model):
         python=dict(dir=PYTHON_DIR, contract=CONTRACT_VERSION, task=entry(task_cls), robot=entry(robot_cls),
                     packages=list(BROWSER_PACKAGES)),
         agents=task.agents, commands=task.commands, settings=list(task.settings) + list(robot_cls.settings),
-        keys=robot_cls.keys, states=list(task.states), episode_s=task.episode_s,
+        keys=robot_cls.keys, states=list(task.states), episode_s=task.episode_s, camera=cam, layout=list(task.layout),
         observation=dict(dim=dims[host.names[0]], dims=dims), action=dict(dim=int(robot_cls.action_dim)),
     )
 
