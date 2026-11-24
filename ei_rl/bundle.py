@@ -243,6 +243,7 @@ def write_bundle(out_dir, spec, mjb, vis_bin, visual, python):
     remote_meshes); python: python_files'.
     """
     spec["visual"] = {"file": "visual.bin.gz", **visual}
+    spec["python"]["files"] = sorted(python)  # what the extension fetches into Pyodide
     spec["bundle_id"] = bundle_id(spec, mjb, vis_bin, python)
     # Written next to sim/ and swapped in: the extension may read it while training runs, and must never see
     # half a bundle, or this run's model next to a previous run's sim.json

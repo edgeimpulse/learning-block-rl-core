@@ -1,25 +1,23 @@
 # Copyright (c) 2026 EdgeImpulse Inc.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-"""The simulation contract on mujoco: NativeSim, and Host, the loop that steps a Robot and a Task (see
-ei_rl.sim). A block's training env steps its task through a Host, so it trains in the loop the extension
-runs; from_bundle loads a written bundle the way the extension does, for the block's checks.
+"""The simulation contract on mujoco: NativeSim, and Host, ei_rl.sim.host's loop on an MjModel. A block's
+training env steps its task through a Host, so it trains in the loop the extension runs (the same code, on
+MuJoCo WASM); from_bundle loads a written bundle the way the extension does, for the block's checks.
 """
 
 import importlib
 import json
 import sys
-from collections import deque
 from pathlib import Path
 
 import mujoco
 import numpy as np
 
-from . import DATA_FIELDS, MODEL_FIELDS, MODEL_SIZES, OBJECT_KINDS, Sim
+from . import DATA_FIELDS, MODEL_FIELDS, MODEL_SIZES, OBJECT_KINDS, Sim, host
+from .host import DEFAULT_OPTIONS
 
 _OBJ = {k: getattr(mujoco.mjtObj, "mjOBJ_" + ("JOINT" if k == "joint" else k.upper())) for k in OBJECT_KINDS}
-
-DEFAULT_OPTIONS = dict(noise=True, randomize=True, obs_delay=None, action_delay=0)
 
 
 class _Fields:
@@ -57,6 +55,12 @@ class NativeSim(Sim):
         self.decimation = int(decimation)
         self.options = dict(DEFAULT_OPTIONS, **(options or {}))
 
+    def _reset_data(self):
+        mujoco.mj_resetData(self._m, self._d)
+
+    def _step(self):
+        mujoco.mj_step(self._m, self._d)
+
     def name2id(self, kind, name):
         return mujoco.mj_name2id(self._m, _OBJ[kind], name)
 
@@ -85,73 +89,13 @@ def check_fields(model, data):
                 raise AssertionError(f"{k}: mujoco's shape {got}, the contract's {want}")
 
 
-class Host:
-    """Steps a Task and its Robots on a model, in the order the ei_rl.sim docstring gives.
-
-    task_cls, robot_cls: the classes; options: the extension's switches and settings (DEFAULT_OPTIONS, plus
-    each setting's default); seed: the rng's seed.
-
-      host.reset(state=None)  -> {name: observation}
-      host.step(actions)      -> ({name: observation}, done or None); actions: {name: action}, or the
-                                 policy robot's action alone (the others then get zeros)
-    """
+class Host(host.Host):
+    """host.Host on a mujoco model: Host(model, task_cls, robot_cls, options=None, seed=0). host.model and
+    host.data are the MjModel and MjData."""
 
     def __init__(self, model, task_cls, robot_cls, options=None, seed=0):
         self.model, self.data = model, mujoco.MjData(model)
-        settings = {s["name"]: s["default"] for s in list(task_cls.settings) + list(robot_cls.settings)}
-        self.sim = NativeSim(model, self.data, task_cls.decimation, dict(settings, **(options or {})))
-        self.task = task_cls(self.sim)
-        self.names = [a["name"] for a in self.task.agents]
-        self.robots = {n: robot_cls(self.sim, n) for n in self.names}
-        self.rng = np.random.default_rng(seed)
-        self.action_dim = robot_cls.action_dim
-        self.obs = None
-
-    def reset(self, state=None):
-        sim, rng = self.sim, self.rng
-        mujoco.mj_resetData(self.model, self.data)
-        drawn = rng if sim.options["randomize"] else None
-        for r in self.robots.values():
-            r.randomize(sim, drawn)
-        self.task.randomize(sim, drawn)
-        self.task.reset(sim, rng, state)
-        for r in self.robots.values():
-            r.reset(sim, rng)
-        mujoco.mj_forward(self.model, self.data)
-        zeros = np.zeros(self.action_dim)
-        self.pending = deque([{n: zeros for n in self.names}] * int(sim.options["action_delay"] or 0))
-        self.steps = 0
-        self.obs = self.observe()
-        return self.obs
-
-    def observe(self):
-        return {n: self.task.observe(self.sim, n, self.rng) for n in self.names}
-
-    def step(self, actions):
-        sim, m, d = self.sim, self.model, self.data
-        if not isinstance(actions, dict):
-            actions = {self.names[0]: actions}
-        actions = {n: np.asarray(actions.get(n, np.zeros(self.action_dim)), np.float64) for n in self.names}
-        self.pending.append(actions)
-        applied = self.pending.popleft()
-        for n, r in self.robots.items():
-            r.command(sim, applied[n])
-        for _ in range(sim.decimation):
-            for r in self.robots.values():
-                r.apply(sim)
-            mujoco.mj_step(m, d)
-        if self.task.forward_after_step:
-            mujoco.mj_forward(m, d)
-        self.steps += 1
-        self.task.after_step(sim)
-        self.obs = self.observe()
-        return self.obs, self.task.done(sim)
-
-    def metrics(self):
-        out = list(self.task.metrics(self.sim))
-        for r in self.robots.values():
-            out += r.metrics(self.sim)
-        return out
+        super().__init__(NativeSim(model, self.data, task_cls.decimation), task_cls, robot_cls, options, seed)
 
 
 def load_classes(python_dir, entry):

@@ -91,8 +91,10 @@ class HostTest(unittest.TestCase):
 class BundleTest(unittest.TestCase):
     def test_python_files(self):
         files = bundle.python_files(Rail, Cart)
-        self.assertEqual(sorted(files), ["ei_rl/__init__.py", "ei_rl/sim/__init__.py", "toy_sim/__init__.py",
-                                         "toy_sim/env.py", "toy_sim/robot.py"])
+        self.assertEqual(sorted(f for f in files if not f.startswith("ei_rl/")),
+                         ["toy_sim/__init__.py", "toy_sim/env.py", "toy_sim/robot.py"])
+        self.assertIn("ei_rl/sim/host.py", files)
+        self.assertNotIn("ei_rl/sim/native.py", files)
         self.assertEqual(files["toy_sim/__init__.py"], b"")
 
     def test_python_files_refuses(self):
