@@ -19,6 +19,8 @@ The extension passes `bridge`, a JS object:
   ray(pnt, vec, geomgroup or null, flg_static, bodyexclude) -> [distance, geom id]
 """
 
+import importlib
+
 import numpy as np
 from pyodide.ffi import to_js
 
@@ -140,7 +142,10 @@ class Host(_host.Host):
         return {n: o.tolist() for n, o in obs.items()}, d
 
     def set_options(self, options):
-        self.sim.options.update(_plain(options))
+        o = _plain(options)
+        if "seed" in o:
+            self.rng = np.random.default_rng(int(o.pop("seed")))
+        self.sim.options.update(o)
 
     def set_command(self, name, value):
         self.sim._data.clear()
@@ -156,9 +161,20 @@ class Host(_host.Host):
         return dict(metrics=self.metrics(), markers=self.markers())
 
 
+def make_host(bridge, spec, options=None, seed=0):
+    """The Host of a bundle (its sim.json, as JS gives it), on the extension's MuJoCo."""
+    spec = _plain(spec)
+    return Host(bridge, spec, _load(spec["python"]["task"]), _load(spec["python"]["robot"]), options, seed)
+
+
+def _load(entry):
+    mod, _, name = entry.partition(":")
+    return getattr(importlib.import_module(mod), name)
+
+
 def _plain(x):
     """A JS object as Python dicts, lists and numbers."""
     return x.to_py() if hasattr(x, "to_py") else (x or {})
 
 
-__all__ = ["BrowserSim", "Host"]
+__all__ = ["BrowserSim", "Host", "make_host"]
