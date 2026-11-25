@@ -43,6 +43,12 @@ class HostTest(unittest.TestCase):
         np.testing.assert_array_equal(a, b)
         self.assertGreater(np.abs(a - c).max(), 0)
 
+    def test_task_gets_the_robots(self):
+        host = Host(self.model, Rail, Cart)
+        self.assertIs(host.task.robots, host.robots)
+        self.assertEqual(list(host.task.robots), [a["name"] for a in Rail.agents])
+        self.assertIsInstance(host.task.robots["robot"], Cart)
+
     def test_reset_clears_the_robot(self):
         host = Host(self.model, Rail, Cart, dict(noise=False, randomize=False))
         a, _ = episode(host)

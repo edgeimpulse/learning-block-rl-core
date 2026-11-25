@@ -15,8 +15,8 @@ class Rail(Task):
     camera = camera(2.5, -15, 90, track="cart")
     layout = ["rail"]  # its colour shows the start state
 
-    def __init__(self, sim):
-        super().__init__(sim)
+    def __init__(self, sim, robots):
+        super().__init__(sim, robots)
         self.q = sim.model.jnt_qposadr[sim.id("joint", "slide")]
         self.tip = sim.id("site", "tip")
         self.rail = sim.id("geom", "rail")

@@ -17,7 +17,9 @@ import only the standard library, numpy, ei_rl.sim and each other; ei_rl.bundle 
 with this module, into the bundle. This module itself imports nothing else.
 
 A host steps them: ei_rl.sim.native.Host in training and in the block's checks, the extension's engine in the
-browser. Each episode and each policy step, in this order:
+browser. It makes one Robot per agent of the task, Robot(sim, name), then the Task, Task(sim, robots): robots
+is {agent name: Robot}, task.robots, so the task can read its robots (their last action, their randomization).
+Each episode and each policy step, in this order:
 
   reset(state)    mj_resetData
                   robot.randomize(sim, rng) for each robot, then task.randomize(sim, rng): rng None when
@@ -225,10 +227,10 @@ class Robot:
 
 class Task:
     """What the robots do: the scene's start states, the observations, the end of an episode, and what the
-    extension shows. The host makes one: Task(sim).
+    extension shows. The host makes one, after the robots: Task(sim, robots), robots {agent name: Robot} (self.robots).
 
     id, label           the task's id (as in the training's task descriptor) and a readable name
-    agents              agent(...)s; the first is the policy's
+    agents              agent(...)s; the first is the policy's. A class attribute: the host reads it before it makes the task
     decimation          physics steps per policy step
     episode_s           the episode length (s), for the default done(); None: no time limit
     commands, settings  command(...)s and setting(...)s, see those
@@ -254,7 +256,8 @@ class Task:
     camera = None
     layout = []
 
-    def __init__(self, sim):
+    def __init__(self, sim, robots):
+        self.robots = robots
         self.command_values = {c["name"]: np.array(c["default"], np.float64) for c in self.commands}
 
     def set_command(self, name, value):

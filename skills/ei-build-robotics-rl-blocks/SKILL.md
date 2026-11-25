@@ -408,7 +408,8 @@ And what they return at run time:
 - `Task.markers(sim)`: `arrow(pos, vec, rgba=..., label=None)`s and `point(pos, rgba=..., radius=0.02, label=None)`s,
   drawn in the scene.
 
-The methods: `Robot(sim, name)` and `Task(sim)` look up their ids in `__init__` (`sim.id("joint", "slide")`),
+The methods: `Robot(sim, name)` and `Task(sim, robots)` (the host makes the robots first; `self.robots` is
+`{agent name: Robot}`, so the task reads its robots there) look up their ids in `__init__` (`sim.id("joint", "slide")`),
 never hardcoded (the bundle's model has fewer geoms than the full one). `randomize` writes absolute values from
 the nominal ones kept in `__init__` (`mj_resetData` doesn't reset the model), and the nominal values when
 `rng` is None. `Task.reset` sets `qpos`, `qvel`, the commands and the layout, and clears the observation's
