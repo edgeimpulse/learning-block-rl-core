@@ -107,8 +107,15 @@ class BundleTest(unittest.TestCase):
         with self.assertRaises(ValueError) as e:
             bundle.python_files(Bad)
         msg = str(e.exception)
-        for name in ("gymnasium", "mujoco", "ei_rl.sim.native", "toy_sim.XML"):
+        for name in ("mujoco", "ei_rl.sim.native", "toy_sim.XML"):
             self.assertIn(name, msg)
+
+    def test_browser_stdlib(self):
+        # the standard library as Pyodide has it: not what it leaves out, nor what Python 3.13 removed
+        for ok in ("json", "collections.abc", "math"):
+            self.assertTrue(bundle._external_ok(ok, []), ok)
+        for missing in ("tkinter", "readline", "telnetlib", "imghdr"):
+            self.assertFalse(bundle._external_ok(missing, []), missing)
 
     def test_round_trip(self):
         model = mujoco.MjModel.from_xml_string(XML)

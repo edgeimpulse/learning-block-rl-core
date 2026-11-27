@@ -1,4 +1,3 @@
-import gymnasium  # noqa: F401
 import mujoco  # noqa: F401
 
 from ei_rl import sim
