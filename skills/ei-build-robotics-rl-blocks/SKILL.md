@@ -376,13 +376,14 @@ step(actions)   robot.command(sim, action) for each robot               the acti
                 decimation times: robot.apply(sim) for each robot, then mj_step
                 mj_forward                                              unless task.forward_after_step is False
                 task.after_step(sim)
-                task.observe(sim, name, rng) for each robot
+                task.observe(sim, name, rng) for each robot             given obs_delay steps later
                 task.done(sim)                                          -> ({name: obs}, done or None)
 ```
 
 `rng` is a numpy Generator the host seeds: the same seed gives the same episode in training and in the browser,
 so draw every random number from it. `sim.options` holds the host's switches (`noise`, `randomize`, `obs_delay`,
-`action_delay`) and the declared settings' values.
+`action_delay`) and the declared settings' values. The two delays are the host's: whole policy steps on top of any
+latency the robot models itself, which stays the block's (per sensor, randomized as trained).
 
 **The declarations** are plain dicts from `ei_rl.sim`'s functions, set as class attributes:
 
@@ -505,7 +506,7 @@ class MyRobotEnv(gym.Env):
 ```
 
 `Host(model, task_cls, robot_cls, options=None, seed=0)`: `options` overrides `DEFAULT_OPTIONS`
-(`noise=True, randomize=True, obs_delay=None, action_delay=0`) and the settings' defaults. `host.task`,
+(`noise=True, randomize=True, obs_delay=0, action_delay=0`) and the settings' defaults. `host.task`,
 `host.robots` (`{name: Robot}`), `host.sim`, `host.metrics()` and `host.markers()` are there for the snapshots
 and the evaluation. A trainer with its own vectorized simulator (mjlab, on GPU) can't step a Host: its Robot
 and Task then reproduce the training env, and the block checks them against it.

@@ -79,6 +79,13 @@ class HostTest(unittest.TestCase):
         np.testing.assert_array_equal(now[0], late[0])
         self.assertGreater(np.abs(now[2:] - late[2:]).max(), 0)
 
+    def test_obs_delay(self):
+        # the same physics (the actions don't depend on the observations), seen 2 steps late
+        now, _ = episode(Host(self.model, Rail, Cart, dict(noise=False, randomize=False)))
+        late, _ = episode(Host(self.model, Rail, Cart, dict(noise=False, randomize=False, obs_delay=2)))
+        np.testing.assert_array_equal(late[:3], [now[0]] * 3)
+        np.testing.assert_array_equal(late[2:], now[:-2])
+
     def test_only_contract_fields(self):
         host = Host(self.model, Rail, Cart)
         with self.assertRaisesRegex(AttributeError, "contract"):

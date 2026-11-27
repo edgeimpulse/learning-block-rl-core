@@ -10,7 +10,9 @@ from collections import deque
 
 import numpy as np
 
-DEFAULT_OPTIONS = dict(noise=True, randomize=True, obs_delay=None, action_delay=0)
+# action_delay, obs_delay: whole policy steps the host holds the actions and the observations back, on top of any
+# latency the robot models itself (a what-if in the extension; 0 in training)
+DEFAULT_OPTIONS = dict(noise=True, randomize=True, obs_delay=0, action_delay=0)
 
 
 class Host:
@@ -51,6 +53,7 @@ class Host:
         self.pending = deque([{n: zeros for n in self.names}] * int(sim.options["action_delay"] or 0))
         self.steps = 0
         self.obs = self.observe()
+        self.seen = deque([self.obs] * int(sim.options["obs_delay"] or 0))  # the observations still on their way
         return self.obs
 
     def observe(self):
@@ -73,7 +76,8 @@ class Host:
             sim.forward()
         self.steps += 1
         self.task.after_step(sim)
-        self.obs = self.observe()
+        self.seen.append(self.observe())
+        self.obs = self.seen.popleft()
         return self.obs, self.task.done(sim)
 
     def metrics(self):

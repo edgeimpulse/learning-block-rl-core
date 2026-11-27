@@ -33,7 +33,7 @@ Each episode and each policy step, in this order:
                   decimation times: robot.apply(sim) for each robot, then mj_step
                   mj_forward (unless task.forward_after_step is False)
                   task.after_step(sim)
-                  task.observe(sim, name, rng) for each robot
+                  task.observe(sim, name, rng) for each robot (given obs_delay steps later)
                   task.done(sim)
 
 rng is a numpy Generator, seeded by the host: the same seed gives the same random draws in training and in
