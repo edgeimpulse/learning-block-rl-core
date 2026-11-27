@@ -48,6 +48,7 @@ CONTRACT_VERSION = 1
 # The fields a Sim gives: name -> (rows, columns). rows is a size of the model (an attribute of sim.model),
 # columns None for a one-dimensional field. Natively these are views of mujoco's arrays; in the browser,
 # copies, written back after each call (for the data fields in WRITABLE_DATA, and every model field).
+# So don't keep a data field across calls: read it from sim.data each time (a kept copy is read-only).
 MODEL_FIELDS = {
     "body_parentid": ("nbody", None), "body_rootid": ("nbody", None), "body_jntadr": ("nbody", None),
     "body_jntnum": ("nbody", None), "body_dofadr": ("nbody", None), "body_mocapid": ("nbody", None),

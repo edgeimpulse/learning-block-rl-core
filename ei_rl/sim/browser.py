@@ -5,7 +5,8 @@
 bundle's robot.py and env.py, and the Host that steps them (ei_rl.sim.host, the loop training runs).
 
 MuJoCo runs in its own WASM instance, so its arrays can't be numpy views: each field is copied in when the
-Python first reads it, and the data's copies are dropped after every mj_step, mj_forward and mj_resetData.
+Python first reads it, and the data's copies are dropped (made read-only) after every mj_step, mj_forward and
+mj_resetData.
 Copies go back to MuJoCo before those, and at the end of each host call: the writable data fields that were
 read (WRITABLE_DATA), and the model fields that changed.
 
@@ -92,10 +93,17 @@ class BrowserSim(Sim):
                 self._bridge.view("model", k).assign(np.ascontiguousarray(a).reshape(-1))
                 last[...] = a
 
+    def _drop(self):
+        """Drop the data's copies, read-only first: a robot or a task that kept one (self.ctrl = sim.data.ctrl)
+        then raises on its next write, rather than writing into a copy MuJoCo never sees."""
+        for a in self._data.values():
+            a.flags.writeable = False
+        self._data.clear()
+
     def _after(self, op):
         self.flush()
         op()
-        self._data.clear()
+        self._drop()
 
     def _reset_data(self):
         self._after(self._bridge.reset_data)
@@ -129,13 +137,13 @@ class Host(_host.Host):
         super().__init__(sim, task_cls, robot_cls, _plain(options), seed)
 
     def reset_js(self, state=None):
-        self.sim._data.clear()  # the page may have moved things since the last call
+        self.sim._drop()  # the page may have moved things since the last call
         obs = self.reset(None if state is None else int(state))
         self.sim.flush()
         return {n: o.tolist() for n, o in obs.items()}
 
     def step_js(self, actions):
-        self.sim._data.clear()
+        self.sim._drop()
         acts = {str(n): np.asarray(list(a), np.float64) for n, a in _plain(actions).items()}
         obs, d = self.step(acts)
         self.sim.flush()
@@ -148,7 +156,7 @@ class Host(_host.Host):
         self.sim.options.update(o)
 
     def set_command(self, name, value):
-        self.sim._data.clear()
+        self.sim._drop()
         self.task.set_command(str(name), np.asarray(list(value), np.float64))
         self.sim.flush()
 
@@ -157,7 +165,7 @@ class Host(_host.Host):
 
     def panel(self):
         """What the extension shows after a step: {'metrics': [...], 'markers': [...]}."""
-        self.sim._data.clear()
+        self.sim._drop()
         return dict(metrics=self.metrics(), markers=self.markers())
 
 
