@@ -12,8 +12,8 @@ two outputs for the Studio extensions:
   terms, clips of the policy at training milestones, the benchmark of the exported model;
 - the **simulation bundle** (format `ei-rl-sim`), read by the
   [RL policy simulator](https://github.com/edgeimpulse/rl_policy_simulator_extension): a copy of the simulation
-  the policy trains in (`sim/scene.mjb.gz`, `sim/visual.bin.gz`, `sim/sim.json`), so the extension runs the policy
-  in the browser, plus the **checkpoints** (`checkpoints/step_<n>.onnx`) it saves while it trains.
+  the policy trains in (`sim/scene.mjb.gz`, `sim/visual.bin.gz`, `sim/sim.json`, and the block's Robot and Task
+  in `sim/python/`), so the extension runs the policy in the browser, plus the **checkpoints** (`checkpoints/step_<n>.onnx`) it saves while it trains.
 
 The shared code is in this repository (`ei_rl`). A block keeps only what is specific to its robot and task.
 For the general learning-block rules (parameters.json, arguments, output files, Docker, push), see the
@@ -23,18 +23,19 @@ For the general learning-block rules (parameters.json, arguments, output files, 
 
 `rl-viz` is specified in the training monitor's README (sections "Data format", "Task descriptor", "Adding a
 robot"), `ei-rl-sim` in the policy simulator's README ("Bundle format", "Live checkpoints", "Parity test").
-`ei_rl` implements both. Never invent a field or a file in a block: if a task needs something new (an
-observation kind, an actuator, a column), it is agreed with the extension's owner, added to the extension, then to
-`ei_rl`. A block emits the formats only through `ei_rl`, never with its own copy.
+`ei_rl` implements both. Never invent a field or a file in a block: if a task needs something new (a monitor
+column, a field of the Sim), it is agreed with the extension's owner, added to the extension, then to `ei_rl`. A
+block emits the formats only through `ei_rl`, never with its own copy. A new robot or task in the simulator needs
+none of that: it is the block's own Robot and Task on `ei_rl.sim` (see [The simulation bundle](#the-simulation-bundle)).
 
-Read those README sections before writing a task descriptor or a `sim.json`.
+Read those README sections before writing a task descriptor or a simulation.
 
 ## Layers
 
 | Layer | Holds | Example |
 |---|---|---|
-| `ei_rl` (this repo) | The Studio contract, the two formats, the trainer integrations | `RLViz`, `RLVizCallback`, `export_onnx`, `write_bundle` |
-| The robot package | The MJCF scene, the environments, the rewards, the randomization, registered as tasks the framework's way; its own train and play commands. No Edge Impulse code | `microduck_rl` (mjlab tasks, the robot maker's); `miniauto_rl` (Gymnasium tasks, in the block's repo) |
+| `ei_rl` (this repo) | The Studio contract, the two formats, the simulation contract (`ei_rl.sim`), the trainer integrations | `RLViz`, `RLVizCallback`, `export_onnx`, `ei_rl.sim.Task`, `write_bundle` |
+| The robot package | The MJCF scene, the Robot and the Task on `ei_rl.sim` (`robot.py`, `env.py`), the environments around them, the rewards, registered as tasks the framework's way; its own train and play commands. No Studio code (`ei_rl.sim` needs only numpy) | `microduck_rl` (mjlab tasks, the robot maker's); `miniauto_rl` (Gymnasium tasks, in the block's repo) |
 | The block | The Studio entry point, which tasks Studio lists, the block's own tasks, and the task-specific glue for the extensions | `ei_train.py`, `studio.toml`, `tasks/`, `rl_viz.py`, `sim_bundle.py`, `Dockerfile` |
 
 A typical block:
@@ -48,7 +49,8 @@ A typical block:
 | `tasks/` | The block's own tasks, in the robot package's format; `_template.py`, the code editor's starting code; `python -m tasks train\|play\|list-envs` |
 | `reward_params.py` | Generates `parameters.json` (the Task option, the reward weights) from the tasks, `--check`, and applies the weights set in Studio |
 | `rl_viz.py` | `task_info()` (the task descriptor) and `rollout_snapshot()` (the test each snapshot plays) |
-| `sim_bundle.py` | `describe()` (sim.json), `write_bundle()`, a Python `Engine` that runs the bundle, `--check` |
+| `<robot>_rl/robot.py`, `<robot>_rl/env.py` | The Robot and the Task on `ei_rl.sim`: the simulation training steps and the simulator runs |
+| `sim_bundle.py` | `write_bundle(out_dir)`: the physics and visual models, `task_spec`, `python_files`; run in the Dockerfile |
 | `record_samples.py` | Optional: model inputs and outputs as Studio samples |
 | `parameters.json` (generated), `Dockerfile`, `requirements-block.txt` | The block |
 | `requirements.txt`, `setup.sh` | A local venv with the same pins, and the package installed editable |
@@ -130,24 +132,29 @@ class MyRobotEnv(gym.Env):
         return obs, reward, fell, timed_out, info
 ```
 
-Design it for sim-to-real from the start, since the bundle has to describe all of it:
+Build its simulation on `ei_rl.sim`: the env wraps a Host stepping the block's Robot and Task, and adds the
+rewards (see [The simulation bundle](#the-simulation-bundle)). Design it for sim-to-real from the start, since the
+simulator runs the Robot and the Task as they are:
 
 - an observation from what the real robot senses, with its noise and delay; a privileged critic may see more
   (the true state), appended after the actor's part, so the export can slice it off;
 - the robot's sensors as **MuJoCo sensors** in the model (`gyro`, `accelerometer`, `framezaxis`, `rangefinder`,
-  `geomdist`, `touch`, ...), read from `data.sensordata`, rather than computed in Python: the bundle then carries
-  them in the `.mjb`, the simulator reads `sensordata` with no new code, and they survive a MuJoCo upgrade. Add
+  `geomdist`, `touch`, ...), read from `sim.data.sensordata`, rather than computed in Python: the bundle carries
+  them in the `.mjb`, they cost no Python in the browser, and they survive a MuJoCo upgrade. Add
   noise, delay and thresholds on top (a line sensor: a `rangefinder` per channel, compared with a distance).
   The same goes for terminations a sensor can state (off the line: a `geomdist` over a distance). Sensors cost
-  time in every `mj_step`; if the policy reads them once per control step, disable them for the substeps
-  (`model.opt.disableflags |= mjDSBL_SENSOR`) and compute them in a final `mj_forward`;
+  time in every `mj_step`; if the policy reads them once per control step, disable them on the model before it
+  is written (`model.opt.disableflags |= mjDSBL_SENSOR`) and let the host's `mj_forward` after the substeps
+  compute them;
 - a scene the training draws at random (a circuit, obstacles): move the model's geoms (`geom_pos`, `geom_quat`,
-  `geom_size`, `geom_rbound` for `mj_ray`) on the compiled model rather than recompiling, so the bundle can carry
-  a few of them as layouts;
-- actions in [-1, 1], mapped to targets the same way in training, in the bundle and on the robot;
+  `geom_size`, `geom_rbound` for `mj_ray`, `geom_rgba`) in `Task.reset` rather than recompiling, and list them in
+  the Task's `layout`, so the viewer redraws them;
+- actions in [-1, 1], mapped to targets the same way in training, in the simulator and on the robot (the Robot's
+  `command` and `apply`);
 - the actuator model (servo, PD, the firmware's own mixing) and domain randomization (friction, masses,
   motor parameters, latency), with nominal values for the snapshots and ranges for the evaluation;
-- a `randomize=False` mode and a seeded `reset(seed=...)`, so a snapshot or a test is the same every time.
+- a `randomize=False` mode and a seeded `reset(seed=...)`, so a snapshot or a test is the same every time (the
+  Host's `randomize` option and its `rng`).
 
 ## Tasks
 
@@ -334,48 +341,221 @@ run finished.
 
 ## The simulation bundle
 
-`sim_bundle.py` writes `sim/` and proves it reproduces the training environment.
+The simulator runs the block's own simulation code, not a description of it. The block writes it as two
+classes on `ei_rl.sim`, the simulation contract, in two files:
 
-1. **Physics:** `bundle.physics_model(full_model, spec, reset=..., control=...)` compiles the scene without its
-   visual-only geoms, then checks that it simulates exactly as the full model (random controls from the reset).
-   It returns the `.mjb` bytes. It drops every geom with `contype = conaffinity = 0`, including those a sensor
-   sees (a rangefinder sees every geom, colliding or not): when sensors need them, write the env's own model
-   with `bundle.model_bytes(env.model)` instead, so geom ids also match the visual list.
-2. **Visuals:** `bundle.visual_model(full_model)` decimates the meshes into `visual.bin` and lists every visual
-   geom. A mesh that may not be redistributed goes in `remote_meshes` instead (see Assets).
-3. **`describe(env, model)`:** the block's `sim.json`, read from the environment's own objects (addresses,
-   gains, noise, delays, ranges), never retyped constants, so the bundle can't drift from the training. Use only
-   the kinds the simulator's README lists (observation terms, signals, actions, actuators, commands,
-   randomization). A new kind is a change to the extension first. Prefer the MuJoCo-native ones (format
-   version 2): a `sensordata` signal (the sensors' `adr`, optionally `within: [lo, hi]` for a 0/1 reading), `flip`
-   noise, `terminations.sensors`, and `layouts` (each a set of model rows to write, with `initial_states[i].layout`
-   naming the one a state is on; give the visual geoms they move a `geom_id`). Set `"version": 2` when the bundle
-   uses any of them.
+- `robot.py`, a **Robot**: how one robot's actions drive its motors (ctrl, or applied forces), every physics
+  step;
+- `env.py`, a **Task**: the start states, what each robot observes, when an episode ends, and what the
+  extension shows (commands, settings, metrics, markers).
 
-   ```python
-   def describe(env, model):
-       return {
-           "format": FORMAT, "version": VERSION,
-           "robot": {"name": "myrobot", "display_name": "My robot", "root_body_id": ..., ...},
-           "task": {"id": "myrobot-walk", "episode_length_s": env.max_steps * env.control_dt, "kind": "perpetual"},
-           "mujoco": {"version": mujoco.__version__, "model": "scene.mjb.gz",
-                      "physics_dt": float(model.opt.timestep), "decimation": env.n_substeps, ...},
-           "joints": [...], "action": {"type": "joint_position", "offset": [...], "scale": [...]},
-           "actuator": {"type": "pd", "kp": [...], "kd": [...], ...},
-           "observation": {"dim": OBS_DIM, "terms": [...]},
-           "commands": {...}, "terminations": {...}, "randomization": {...},
-           "initial_states": initial_states(env),     # sampled from the trained reset distribution
-           "policy": {"onnx": "policy/model.onnx", "input": "input", "output": "output", "obs_dim": OBS_DIM, ...},
-           "camera": {...},
-       }
-   ```
-4. **`write_bundle(out_dir, ...)`** calls `bundle.write_bundle(out_dir, describe(...), mjb, vis_bin, visual)`,
-   which adds the `bundle_id` and writes the three files.
-5. **`Engine`:** a Python implementation of the simulator's engine that runs the bundle alone (sim.json and the
-   `.mjb`), as `engine.js` does in the browser. `--check` steps it next to the environment, from the same states
-   under the same actions, and fails unless observations, qpos and terminations match (around 1e-5 and 1e-8).
-   Run it in the Dockerfile so a broken bundle fails the build. The simulator's parity test then compares
-   `engine.js` to this `Engine`.
+Training steps them with `ei_rl.sim.native.Host` on mujoco; the extension steps the same files with the same
+loop in Pyodide, on MuJoCo WASM. So they import only the standard library, numpy, `ei_rl.sim` and each other
+(or the block's other modules that obey the same rule): no mujoco, gymnasium or torch. Keep them in modules of
+their own, not in a package `__init__.py`, which the bundle leaves empty. `ei_rl.sim`'s docstring is the
+specification; `tests/toy_sim/` in this repo is the smallest complete example (a cart on a rail).
+
+**The Sim** they see: `sim.model` and `sim.data`, every numeric array and size of `mjModel` and `mjData` as
+numpy arrays (shaped as the mujoco bindings shape them: `efc_force` is `(nefc,)`, `ncon` and `nefc` follow each
+step), and `sim.data.contact` (each field `(ncon, ...)`, read-only); `physics_dt`, `decimation`, `dt`;
+`options`; and `name2id`, `id2name`, `id` (a missing name is a `KeyError`), `ray` (mj_ray) and `forward`
+(mj_forward). Any of these arrays may be written, in place (`sim.data.qpos[:] = ...`, not `sim.data.qpos =
+...`); the simulator writes back what changed. The table is `mujoco.introspect`'s for the bundle's MuJoCo
+version (`ei_rl/sim/fields.json` in the bundle). Strings, structs other than `contact` (`opt`, `stat`) and
+other MuJoCo functions are an `AttributeError`; a function more is a change to `ei_rl.sim` and to the extension
+(`CONTRACT_VERSION`).
+
+**The order.** `Host.reset(state)` returns `{agent: observation}`, `Host.step(actions)` that and `done`:
+
+```text
+reset(state)    mj_resetData
+                robot.randomize(sim, rng) for each robot, then task.randomize(sim, rng)   rng None: randomization off
+                task.reset(sim, rng, state)
+                robot.reset(sim, rng) for each robot
+                mj_forward
+                task.observe(sim, name, rng) for each robot             -> {name: obs}
+
+step(actions)   robot.command(sim, action) for each robot               the action of action_delay steps ago
+                decimation times: robot.apply(sim) for each robot, then mj_step
+                mj_forward                                              unless task.forward_after_step is False
+                task.after_step(sim)
+                task.observe(sim, name, rng) for each robot             given obs_delay steps later
+                task.done(sim)                                          -> ({name: obs}, done or None)
+```
+
+`rng` is a numpy Generator the host seeds: the same seed gives the same random draws in training and in the
+browser (and the same episode when their MuJoCo versions match), so draw every random number from it. `sim.options` holds the host's switches (`noise`, `randomize`, `obs_delay`,
+`action_delay`) and the declared settings' values. The two delays are the host's: whole policy steps on top of any
+latency the robot models itself, which stays the block's (per sensor, randomized as trained).
+
+**The declarations** are plain dicts from `ei_rl.sim`'s functions, set as class attributes:
+
+| On | Attribute | What |
+|---|---|---|
+| Task | `id`, `label` | the task's ID (as in the task descriptor) and a readable name |
+| Task | `agents = [agent(name, label=None, drivers=("policy", "keyboard", "none"))]` | the robots; the first is the policy's, each other one is driven by one of its `drivers`, picked in the extension. Default: one agent, `robot` |
+| Task | `decimation`, `episode_s` | physics steps per policy step; the episode length (s), for the default `done()` (None: no limit) |
+| Task | `commands = [command(name, dim, low, high, default=None, label=None, axes=None, keys=None, widget="slider")]` | what the user sets while the policy runs and the policy observes; `widget` `slider` (one per axis), `buttons` (`low`, `high`, `default` as presets) or `point` (x, y picked on the ground); `keys` `{key: [axis, value]}` while held. The current values are in `self.command_values[name]` |
+| Task, Robot | `settings = [setting(name, low, high, default, label=None, unit=None, step=None)]` | a value the user sets (a payload, a motor lag), read from `sim.options[name]` at the next reset; the policy doesn't observe it |
+| Task | `states` | labels of the start states the extension offers; `reset`'s `state` is an index into it, None to draw one |
+| Task | `forward_after_step` | False: observe right after `mj_step`, as some trainers do |
+| Task | `camera = camera(distance=1.0, elevation_deg=-20.0, azimuth_deg=135.0, lookat=(0, 0, 0.1), track=None)` | the viewer's start; `track`: a body name to follow |
+| Task | `layout` | the names of the geoms whose `geom_pos`, `geom_quat`, `geom_size` or `geom_rgba` a reset changes (a circuit per start state); the viewer redraws them after each reset |
+| Robot | `action_dim`, `keys` | the action's length; `{key: [action index, value]}`, how the keyboard drives it (held keys add up) |
+
+And what they return at run time:
+- `Task.done(sim)`: None, or `done(reason, label=None, tone="info", **info)`, `tone` `success`, `failure` or
+  `info`. The default returns `done("time_out", "Time out")` after `episode_s`; call `super().done(sim)` last.
+  The trainer maps `time_out` to truncation and any other reason to termination;
+- `Task.metrics(sim)`, `Robot.metrics(sim)`: `metric(label, value, unit=None, chart=True, low=None)`s, the
+  extension's tiles and chart;
+- `Task.markers(sim)`: `arrow(pos, vec, rgba=..., label=None)`s and `point(pos, rgba=..., radius=0.02, label=None)`s,
+  drawn in the scene.
+
+The methods: `Robot(sim, name)` and `Task(sim, robots)` (the host makes the robots first; `self.robots` is
+`{agent name: Robot}`, so the task reads its robots there) look up their ids in `__init__` (`sim.id("joint", "slide")`),
+never hardcoded (the bundle's model has fewer geoms than the full one). `randomize` writes absolute values from
+the nominal ones kept in `__init__` (`mj_resetData` doesn't reset the model), and the nominal values when
+`rng` is None. `Task.reset` sets `qpos`, `qvel`, the commands and the layout, and clears the observation's
+memory; `Robot.reset` clears the actuator's (filters, delays). `Task.observe(sim, name, rng)` returns float32,
+with noise only if `sim.options["noise"]`. Anything stateful the policy sees (history, delays, a filtered
+command) lives in these classes, or the browser won't have it.
+
+```python
+# myrobot_rl/robot.py
+import numpy as np
+from ei_rl.sim import Robot, metric, setting
+
+class MyRobot(Robot):
+    action_dim = 12
+    keys = {"w": [0, 1.0], "s": [0, -1.0]}
+    settings = [setting("payload_kg", 0.0, 2.0, 0.0, "Payload", "kg")]
+
+    def __init__(self, sim, name):
+        super().__init__(sim, name)
+        self.acts = [sim.id("actuator", n) for n in ACTUATORS]
+        self.base = sim.id("body", "base")
+        self.mass0 = float(sim.model.body_mass[self.base])
+
+    def randomize(self, sim, rng):
+        sim.model.body_mass[self.base] = self.mass0 + sim.options["payload_kg"]
+
+    def reset(self, sim, rng):
+        self.target = np.zeros(self.action_dim)
+
+    def command(self, sim, action):
+        self.target = OFFSET + SCALE * np.clip(action, -1, 1)
+
+    def apply(self, sim):
+        sim.data.ctrl[self.acts] = self.target
+```
+
+```python
+# myrobot_rl/env.py
+import numpy as np
+from ei_rl.sim import Task, camera, command, done, metric
+
+class Walk(Task):
+    id, label = "MyRobot-Walk-v0", "Walk"
+    decimation, episode_s = 4, 20.0
+    commands = [command("twist", 3, [-0.5, -0.3, -1.0], [1.0, 0.3, 1.0], label="Velocity",
+                        axes=["forward", "left", "turn"], keys={"ArrowUp": [0, 0.5]})]
+    camera = camera(1.5, -20, 135, track="base")
+
+    def reset(self, sim, rng, state=None):
+        sim.data.qpos[:] = sim.model.key_qpos[0]
+        self.last = np.zeros(12)
+
+    def observe(self, sim, name, rng):
+        x = np.concatenate([...])
+        if sim.options["noise"]:
+            x = x + rng.uniform(-NOISE, NOISE, x.shape)
+        return x.astype(np.float32)
+
+    def done(self, sim):
+        if tilt(sim) > TILT_LIMIT:
+            return done("fell", "Fell", "failure")
+        return super().done(sim)
+
+    def metrics(self, sim):
+        return [metric("Forward speed", forward_speed(sim), "m/s")]
+```
+
+**Training on it.** The block's Gymnasium env wraps a native Host, and keeps what the browser doesn't need:
+the rewards, the reward weights, the info for the monitor. `host.model` and `host.data` are mujoco's own
+`MjModel` and `MjData`, for the rewards and for rendering; the Robot and the Task see only the contract.
+
+```python
+from ei_rl.sim.native import Host
+
+class MyRobotEnv(gym.Env):
+    def __init__(self, randomize=True, seed=0):
+        self.host = Host(build_model(), Walk, MyRobot, dict(randomize=randomize), seed)
+        self.control_dt = self.host.sim.dt
+        self.reward_scales = dict(track_velocity=1.5, upright=0.5, action_rate=-0.01, fall=-10.0)
+
+    def reset(self, seed=None, options=None):
+        if seed is not None:
+            self.host.rng = np.random.default_rng(seed)
+        return self.host.reset()["robot"], {}
+
+    def step(self, action):
+        obs, end = self.host.step(action)          # one robot: its action alone; several: {name: action}
+        terms = self.reward_terms(self.host.data, self.host.task)
+        reward = sum(self.reward_scales[k] * v for k, v in terms.items()) * self.control_dt
+        failed = end is not None and end["reason"] != "time_out"
+        info = dict(terms, is_failure=failed)
+        return obs["robot"], reward, failed, end is not None and not failed, info
+```
+
+`Host(model, task_cls, robot_cls, options=None, seed=0)`: `options` overrides `DEFAULT_OPTIONS`
+(`noise=True, randomize=True, obs_delay=0, action_delay=0`) and the settings' defaults. `host.task`,
+`host.robots` (`{name: Robot}`), `host.sim`, `host.metrics()` and `host.markers()` are there for the snapshots
+and the evaluation. A trainer with its own vectorized simulator (mjlab, on GPU) can't step a Host: its Robot
+and Task then reproduce the training env, and the block checks them against it.
+
+**Writing the bundle** (`sim_bundle.py`, called by `ei_train.py` and the Dockerfile):
+
+```python
+import mujoco
+from ei_rl import bundle
+from myrobot_rl.env import Walk
+from myrobot_rl.robot import MyRobot
+
+def write_bundle(out_dir):
+    spec = mujoco.MjSpec.from_file(SCENE_XML)
+    full = spec.compile()
+    vis_bin, visual = bundle.visual_model(full)
+    model, mjb = bundle.physics_model(full, spec)
+    return bundle.write_bundle(out_dir, bundle.task_spec(Walk, MyRobot, model), mjb, vis_bin, visual,
+                               bundle.python_files(Walk, MyRobot))
+```
+
+1. **Physics:** `bundle.physics_model(full, spec, reset=None, control=None, ...)` compiles the scene without its
+   visual-only geoms, checks it simulates exactly as the full model under random controls, and returns
+   `(model, mjb bytes)`. It drops every geom with `contype = conaffinity = 0`, including those a sensor or a ray
+   sees: when the task needs them, write the model it trains on with `bundle.model_bytes(model)` instead.
+2. **Visuals:** `bundle.visual_model(full)` decimates the meshes and lists every visual geom, by name (the
+   layout's geoms are matched by name); `write_bundle` puts the list in `visual.bin`'s header. A mesh that may not be redistributed goes in
+   `visual["remote_meshes"]` instead (see Assets; `with_group=True` gives each geom its group).
+3. **sim.json:** `bundle.task_spec(task_cls, robot_cls, model)` is the manifest: the MuJoCo version, the entry
+   points, and the observation and action sizes. The rest of the page (agents, commands, settings, keys,
+   states, camera, layout, dt) the extension gets from the Python at open, `Host.describe()`. It runs one reset
+   and one step (no noise, no randomization) and `describe()` to check them, and fails if a layout geom or the
+   tracked body isn't in the model.
+4. **python/:** `bundle.python_files(task_cls, robot_cls)` collects their modules, the block's modules they
+   import, and `ei_rl.sim` (without `native.py`). It raises `ValueError`, listing every import Pyodide can't
+   run.
+5. **`bundle.write_bundle(out_dir, spec, mjb, vis_bin, visual, python)`** adds `python.files` and the
+   `bundle_id`, and swaps `<out_dir>/sim/` in whole. It returns the sim directory.
+
+**The parity check.** The training code is the bundle's code, so what's left to check is the code on the
+browser's MuJoCo. In the simulator's checkout, `test/reference.py <sim dir> ref.json` records a native rollout
+of the bundle (`ei_rl.sim.native.from_bundle`), and `npm run parity -- <sim dir> ref.json` replays it in the
+browser's engine; observations and qpos must match within 1e-9. Run `from_bundle` in a fresh process: it
+imports the bundle's modules by name, and a process that has already imported the block's gets those instead.
+In the Dockerfile, writing the bundle is the check that fails the build: `task_spec` resets and steps the
+task, and `python_files` refuses an import the browser lacks.
 
 **Live checkpoints.** In `ei_train.py`, before training: `clear_policies(custom_data)`, write the bundle, then
 `print_live_header(sim_dir)`. RLViz calls the checkpoint function with the snapshots, at least every 15 minutes,
@@ -388,7 +568,7 @@ live = False
 if custom_data is not None:
     clear_policies(custom_data)
     try:                                   # the bundle is optional: never stop a training over it
-        print_live_header(sim_bundle.write_bundle(custom_data, task_id, env_kwargs))
+        print_live_header(sim_bundle.write_bundle(custom_data))
         live = True
     except Exception as err:
         print(f"WARNING: no simulation bundle for the policy simulator extension: {err!r}")
@@ -402,7 +582,7 @@ def checkpoint(step, iteration, label):
 version a block pins. Moving a block to a new MuJoCo means adding that version to the extension first.
 
 **MuJoCo 4.** The extension already ships 4.0.1. To move a block: pin `mujoco==4.0.1` in a test venv, run
-`sim_bundle.py --check` and the simulator's parity test, then change `requirements.txt` and retrain (a policy
+`sim_bundle.py` and the simulator's parity test, then change `requirements.txt` and retrain (a policy
 trained on 3.x usually still plays, but train on what you ship). Keep code that also runs on 3.x until then:
 build the model with `MjSpec`, use enums by name (`mujoco.mjtSensor.mjSENS_RANGEFINDER`), and set what recent
 versions require explicitly (a `rangefinder` made with `MjSpec` needs `intprm[0] = 1 << mjRAYDATA_DIST`, the
@@ -452,7 +632,7 @@ so every command can be copied as it is.
 | Evaluation | The benchmark of the exported ONNX model, the numbers in `custom_training_metrics.json` |
 
 - Read every value from the run's own objects (the task's config, the checkpoint path, the evaluation results),
-  never retype it, as for `sim.json`.
+  never retype it.
 - A placeholder only for what the block can't know, in angle brackets (`<user>/microduck-walk`), and say what
   goes there.
 - Name the robot package's version (the commit the Dockerfile pins): the commands are that version's.
@@ -522,12 +702,12 @@ COPY ei_train.py studio.py studio.toml reward_params.py parameters.json rl_viz.p
 COPY tasks/ ./tasks/
 
 # Fail the build early: every task builds, parameters.json is up to date, the code editor's template registers a
-# task, offscreen rendering works, the bundle reproduces the env
+# task, offscreen rendering works, the bundle writes (its task resets and steps, its Python runs in the browser)
 RUN python3 -c "import studio, myrobot_rl; [myrobot_rl.make(t).reset(seed=0) for t in studio.load()]"
 RUN python3 reward_params.py --check
 RUN python3 -c "import studio, myrobot_rl; t = [t for t in studio.load('tasks/_template.py').values() if t.from_code_editor][0]; myrobot_rl.make(t.task_id).reset(seed=0)"
 RUN python3 -c "from rl_viz import rollout_snapshot; rollout_snapshot('MyRobot-Walk-v0', lambda o: [0.0] * ACT_DIM, seconds=0.2)"
-RUN python3 sim_bundle.py --out /tmp/sim-check --check && rm -rf /tmp/sim-check
+RUN python3 sim_bundle.py --out /tmp/sim-check && rm -rf /tmp/sim-check
 
 ENTRYPOINT ["python3", "-u", "ei_train.py"]
 ```
@@ -574,10 +754,10 @@ ENTRYPOINT ["python3", "-u", "ei_train.py"]
   `http://localhost:8080/?demo=1`. It answers the Studio API from `out/custom_data/` and the log `out.log` (save
   the run's stdout there). See its "Run locally".
 - **The simulator:** in its checkout, `DEMO_DIR=/path/to/out node server.cjs` and `?demo=1`; it needs
-  `custom_data/sim/` and `custom_data/policy/model.onnx`. Its parity test replays the block's `Engine` in
-  `engine.js` (see "Run locally" and "Parity test").
-- **Unit-sized checks** while developing: `python sim_bundle.py --out /tmp/sim --check [--onnx model.onnx]`, and
-  `python -m unittest discover tests` in this repo.
+  `custom_data/sim/` and `custom_data/policy/model.onnx`. Its parity test replays a native rollout of the bundle
+  in the browser's engine (`test/reference.py`, then `npm run parity`; see "Run locally" and "Parity test").
+- **Unit-sized checks** while developing: `python sim_bundle.py --out /tmp/sim`, a few episodes of the native
+  Host, and `python -m unittest discover tests` in this repo.
 
 **Refactoring a block** (moving code into `ei_rl`, renaming, reordering): run the old and the new code with
 the same seed and a short training on one process, and compare everything except wall-clock fields (`time`,
@@ -592,8 +772,12 @@ checkpoints, `model.onnx` and `sim/` byte for byte. Run the old code twice first
   does this); a block's own files there do the same.
 - Leftovers of a previous run in the custom data: clear `snapshots/`, `checkpoints/` and `policy/` at the start
   (`RLViz.start` and `clear_policies` do).
-- Constants copied into `sim.json` by hand instead of read from the env: the simulator runs a different robot than
-  the one trained, and `--check` is the only thing that catches it.
+- Simulation code outside the Robot and the Task (an observation filter in a wrapper, an action clip in the env):
+  the simulator doesn't run it, so it runs a different robot than the one trained. Everything between the policy
+  and MuJoCo goes in `robot.py` and `env.py`.
+- Random numbers not from the host's `rng` (`np.random`, a second Generator): the browser's episodes no longer
+  match training's for the same seed.
+- Hardcoded ids instead of `sim.id(kind, name)`: the bundle's physics model has fewer geoms than the full one.
 - Evaluating the trainer's policy instead of the exported ONNX: the benchmark then misses an export bug.
 - A snapshot or checkpoint failure that raises: catch it, warn, and keep training.
 - Stale descriptions: when the observation or action changes, update `parameters.json`, the README and
@@ -606,7 +790,7 @@ checkpoints, `model.onnx` and `sim/` byte for byte. Run the old code twice first
 
 ```bash
 edge-impulse-blocks init    # first time only: pick the organization, writes .ei-block-config
-edge-impulse-blocks push    # Edge Impulse builds the image, including the --check step
+edge-impulse-blocks push    # Edge Impulse builds the image, including the checks
 ```
 
 In a project: add the block under **Create impulse** (it is the impulse's only block), then train. Set the job's CPU, memory and time limits on the block in Studio after
@@ -625,10 +809,10 @@ organization once and pick it there (see Deployment).
    `studio.toml`, `tasks/_template.py`, `reward_params.py` (generate `parameters.json`), and `ei_train.py`.
 3. Use `ei_rl` for everything it covers; don't copy its code into the block. If the block needs a change
    in it, make it there, keeping the formats unchanged.
-4. Write `task_info()` and `rollout_snapshot()` from the monitor's README, and `describe()` from the simulator's
-   "Bundle format". If the robot needs a kind the simulator doesn't have, say so and stop at the telemetry until
-   the extension supports it.
-5. Make `sim_bundle.py --check` pass and run it in the Dockerfile.
+4. Write `task_info()` and `rollout_snapshot()` from the monitor's README, and the Robot and the Task on
+   `ei_rl.sim` (start from `tests/toy_sim/` in this repo). If the task needs a MuJoCo field or function the Sim
+   doesn't give, say so: it is a change to `ei_rl.sim` and the extension first.
+5. Make `sim_bundle.py` write the bundle, run it in the Dockerfile, and pass the simulator's parity test.
 6. Verify the ONNX export, evaluate the ONNX model on a fixed benchmark, and write the headline metrics.
 7. Pin every dependency, `ei_rl` to a commit, and check asset licenses before anything is committed.
 8. Write `policy/` with a `DEPLOY.md` generated for the run (see Deployment), and check it reads right for a

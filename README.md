@@ -3,7 +3,7 @@
 A Python package for building [Edge Impulse custom learning blocks](https://docs.edgeimpulse.com/studio/organizations/custom-blocks/custom-learning-blocks)
 that train robot policies with reinforcement learning (RL) in simulation. It isn't a block itself: each RL block
 installs it and keeps only what is specific to its robot and task (the environment, the rewards, the robot model,
-its `sim.json` description).
+its Robot and Task on `ei_rl.sim`).
 
 ## How it fits together
 
@@ -30,8 +30,8 @@ ei-rl[mujoco,sb3] @ https://github.com/edgeimpulse/learning-block-rl-core/archiv
 
 | Extra | Adds | For |
 |---|---|---|
-| (none) | numpy, pillow | `ei_rl.core`, `ei_rl.viz` |
-| `mujoco` | mujoco | `ei_rl.bundle` |
+| (none) | numpy, pillow | `ei_rl.core`, `ei_rl.viz`, `ei_rl.sim` |
+| `mujoco` | mujoco | `ei_rl.bundle`, `ei_rl.sim.native` |
 | `sb3` | Stable-Baselines3, torch, onnx, onnxruntime | `ei_rl.sb3` |
 | `mjlab` | mjlab (with rsl_rl, torch, mujoco) | `ei_rl.mjlab`, `ei_rl.bundle` |
 
@@ -95,11 +95,37 @@ Another trainer gets the same outputs by calling `RLViz.start`, `log` and `finis
 |---|---|---|
 | `ei_rl.core` | The learning-block contract: arguments (`parser`, `parse_args`), the out and custom data directories, `custom_training_metrics.json`, Studio samples (acquisition files, `info.labels`), CPU and memory limits in a container, running `model.onnx` | |
 | `ei_rl.viz` | The training telemetry for the monitor (`RLViz`, `write_eval`), whatever the trainer, and when to take snapshots and checkpoints | |
-| `ei_rl.bundle` | The simulation bundle for the simulator: the physics model without its visual-only geoms (`physics_model`), the decimated visuals (`visual_model`), writing `sim/` (`write_bundle`), and the checkpoints (`save_checkpoint`) | `[mujoco]` |
+| `ei_rl.sim` | The simulation contract: the `Robot` and `Task` a block subclasses, the `Sim` they step, the `Host` loop, `native.Host` for training | `[mujoco]` for `native` |
+| `ei_rl.bundle` | The simulation bundle for the simulator: the physics model without its visual-only geoms (`physics_model`), the decimated visuals (`visual_model`), the task's description (`task_spec`), its Python (`python_files`), writing `sim/` (`write_bundle`), and the checkpoints (`save_checkpoint`) | `[mujoco]` |
 | `ei_rl.sb3` | Gymnasium + Stable-Baselines3: `RLVizCallback` and the ONNX export of the actor with its observation normalization | `[sb3]` |
 | `ei_rl.mjlab` | mjlab + rsl_rl: `RslRlViz` (the runner's logger hook and the time budget) and `checkpoint` (mjlab's ONNX export) | `[mjlab]` |
 
 `ei_rl.core` imports nothing from the other modules, and has no RL code: a block that isn't RL can use it alone.
+
+## The simulation contract
+
+`ei_rl.sim` (`CONTRACT_VERSION = 2`) is what lets the simulator run a block's simulation as it trains, with no
+code for the robot in the extension. A block writes two files, each a subclass on `ei_rl.sim`, importing only the
+standard library, numpy, `ei_rl.sim` and the block's own modules:
+
+- `robot.py`, a `Robot`: the action size, `randomize`, `reset`, `command` (an action to targets, once per policy
+  step), `apply` (the targets to `data.ctrl`, every physics step), `metrics`;
+- `env.py`, a `Task`: its agents, commands and settings (`agent`, `command`, `setting`), `decimation`,
+  `episode_s`, `randomize`, `reset`, `observe`, `done`, `metrics`, `markers`, and the camera.
+
+They run against a `Sim` (`sim.model`, `sim.data`, `sim.id(kind, name)`, `sim.ray`, `sim.forward()`, `sim.options`),
+whose fields are MuJoCo's own: every numeric array and size of `mjModel` and `mjData`, and `data.contact`, as
+`mujoco.introspect` lists them for the bundle's MuJoCo version (the bundle ships the table, `fields.json`). One loop, `ei_rl.sim.host.Host`, steps them, in the
+same order everywhere: `ei_rl.sim.native.Host` on `mujoco` in training (a gym env wraps it and adds the rewards),
+`ei_rl.sim.browser` on MuJoCo WASM in the simulator (Pyodide). `ei_rl.bundle` copies the two files, the block's
+modules they import and `ei_rl.sim` into the bundle (`sim/python/`). A new MuJoCo field needs no change here;
+the contract version changes when a method of the Sim does (a MuJoCo function such as `mj_ray`), and the
+simulator refuses a bundle with another one.
+
+[The skill](skills/ei-build-robotics-rl-blocks/SKILL.md#the-simulation-bundle) explains how to write them;
+[tests/toy_sim](tests/toy_sim) is the smallest Robot and Task (a cart on a rail; `drop.py`, contacts, the
+solver's fields and a model written every physics step), and [tests/toy_bundle.py](tests/toy_bundle.py) writes
+their bundles, for the simulator's parity test.
 
 ## What the extensions read
 
@@ -108,11 +134,13 @@ Another trainer gets the same outputs by calling `RLViz.start`, `log` and `finis
   the reward terms, clips of the policy at training milestones, and the benchmark of the exported model.
 - [rl_policy_simulator_extension](https://github.com/edgeimpulse/rl_policy_simulator_extension) reads the
   **simulation bundle** (format `ei-rl-sim`, written by `ei_rl.bundle`): a copy of the simulation the policy
-  trains in, saved in `sim/` as three files:
+  trains in, saved in `sim/`:
   - `scene.mjb.gz`: the physics model, compiled as the policy trained on it;
   - `visual.bin.gz`: what to draw;
-  - `sim.json`: the robot and the task, written by the block: what the policy observes, how its actions drive
-    the motors, the commands, the start states.
+  - `sim.json`: the manifest (`task_spec`): the MuJoCo version, the Python's files and entry points, and the sizes
+    of the observation and the action;
+  - `python/`: the block's Robot and Task, which the simulator runs. They describe the page too (`Host.describe`):
+    the agents, commands, settings, start states, camera.
 
   The simulator also runs the **checkpoints** the block saves in `checkpoints/` while it trains, so you can
   watch the policy improve before the job ends.
@@ -136,8 +164,9 @@ directory (for Claude Code, `~/.claude/skills/`), or read it as a plain guide.
 python -m unittest discover tests
 ```
 
-The tests need numpy only. They cover `ei_rl.core`, `ei_rl.viz` and the `ei_rl.mjlab` hook (with a stand-in
-runner); `ei_rl.bundle` and `ei_rl.sb3` have no tests yet.
+`test_formats` needs numpy only: it covers `ei_rl.core`, `ei_rl.viz` and the `ei_rl.mjlab` hook (with a
+stand-in runner). `test_sim` needs mujoco: it covers `ei_rl.sim` and `ei_rl.bundle` on the toy task
+(`tests/toy_sim`). `ei_rl.sb3` has no tests yet.
 
 ## License
 

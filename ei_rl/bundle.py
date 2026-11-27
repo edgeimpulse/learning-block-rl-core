@@ -4,23 +4,32 @@
 """The simulation bundle: a copy of the simulation a policy trains in, so the RL policy simulator Studio
 extension can run the policy in the browser, in the physics it trained in.
 
-The format belongs to the extension (rl_policy_simulator_extension, whose README documents it). This module
-writes its generic parts; each block describes its own task (sim.json's robot, joints, action, actuator,
-observation, terminations, randomization, initial states) and keeps a reference engine to check it.
+The format belongs to the extension (rl_policy_simulator_extension, whose README documents it). The robot
+and the task are the block's own Python (a Robot and a Task, see ei_rl.sim), which the extension runs as-is in
+Pyodide; this module checks they can run there, copies them, and writes the rest.
 
-  <custom data>/sim/sim.json        the robot and the task: what the policy observes, how its actions drive
-                                    the motors, the commands, the start states (see the extension's README)
+  <custom data>/sim/sim.json        what the extension needs before it runs the Python: which MuJoCo, which
+                                    files, the entry points, the policy's input and output sizes. The rest
+                                    (the agents, commands, settings, camera, ...) the Python gives at open
+                                    (Host.describe)
+  <custom data>/sim/python/         robot.py, env.py, what they import from the block, and ei_rl.sim (with
+                                    fields.json, the field table of this MuJoCo)
   <custom data>/sim/scene.mjb.gz    the compiled MuJoCo model the policy trained on, minus the visual-only
                                     geoms (physics_model): the physics is bitwise identical
-  <custom data>/sim/visual.bin.gz   what to draw: the visible meshes, decimated (visual_model)
+  <custom data>/sim/visual.bin.gz   what to draw (visual_model, pack_visual): a JSON header (the geoms, the
+                                    meshes, remote_meshes), then the meshes, decimated
   <custom data>/policy/model.onnx   the trained policy
   <custom data>/checkpoints/        the policy while training, for live runs (see below)
 """
 
+import ast
 import gzip
 import hashlib
+import importlib.util
+import inspect
 import json
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -28,7 +37,8 @@ import mujoco
 import numpy as np
 
 FORMAT = "ei-rl-sim"
-VERSION = 1
+VERSION = 4
+PYTHON_DIR = "python"
 SIM_DIR = "sim"
 POLICY_DIR = "policy"
 
@@ -171,8 +181,8 @@ def visual_model(full, cell=0.001, groups=(0, 1, 2), with_group=False):
     """What to draw: every geom in a visible group, each mesh once, decimated to a `cell` grid (m).
 
     Mesh vertices are in the mesh frame of the compiled model, so geom_pos / geom_quat place them exactly.
-    with_group: give each geom its group (for sim.json's visual.remote_meshes, which replace a group).
-    Returns (bytes of visual.bin, its description for sim.json: meshes and geoms).
+    with_group: give each geom its group (for visual.bin's remote_meshes, which replace a group).
+    Returns (the meshes' bytes, their description: meshes and geoms), for pack_visual.
     """
     mesh_index, meshes, chunks, offset = {}, [], [], 0
     geoms = []
@@ -214,29 +224,46 @@ def visual_model(full, cell=0.001, groups=(0, 1, 2), with_group=False):
     return b"".join(chunks), {"meshes": meshes, "geoms": geoms}
 
 
+def pack_visual(mesh_bytes, visual):
+    """visual.bin: a uint32 (little-endian) n, n bytes of JSON (`visual`: geoms, meshes, remote_meshes; padded
+    with spaces so the meshes stay 4-byte aligned), then the meshes (their offsets count from there)."""
+    head = json.dumps(visual, separators=(",", ":")).encode()
+    head += b" " * (-len(head) % 4)
+    return len(head).to_bytes(4, "little") + head + mesh_bytes
+
+
+def unpack_visual(vis_bin):
+    """pack_visual's inverse: (the header, the meshes' bytes)."""
+    n = int.from_bytes(vis_bin[:4], "little")
+    return json.loads(vis_bin[4:4 + n]), vis_bin[4 + n:]
+
+
 # ----------------------------------------------------------------------------------------------------------
 # The bundle
 # ----------------------------------------------------------------------------------------------------------
 
-def bundle_id(spec, mjb, vis_bin):
-    """A hash of what the simulation is: the physics model, the visuals and sim.json without its sampled start
-    states. Two trainings of the same task get the same id, so the extension can run a block's live checkpoints
+def bundle_id(spec, mjb, vis_bin, python=None):
+    """A hash of what the simulation is: the physics model, the visuals, sim.json and the Python. Two
+    trainings of the same task get the same id, so the extension can run a block's live checkpoints
     on another block's bundle while the first still trains."""
     h = hashlib.sha256()
-    for part in (mjb, vis_bin, json.dumps({k: v for k, v in spec.items() if k not in ("initial_states", "bundle_id")},
-                                          sort_keys=True).encode()):
+    for part in (mjb, vis_bin, json.dumps({k: v for k, v in spec.items() if k != "bundle_id"}, sort_keys=True).encode(),
+                 *(python[k] for k in sorted(python or {}))):
         h.update(hashlib.sha256(part).digest())
     return h.hexdigest()[:32]
 
 
-def write_bundle(out_dir, spec, mjb, vis_bin, visual):
-    """Write <out_dir>/sim/: sim.json (`spec`, plus its visual and bundle_id), scene.mjb.gz, visual.bin.gz.
-    Returns the sim directory.
+def write_bundle(out_dir, spec, mjb, vis_bin, visual, python):
+    """Write <out_dir>/sim/: sim.json (`spec`, plus the visual file and bundle_id), scene.mjb.gz,
+    visual.bin.gz and python/. Returns the sim directory.
 
-    visual: sim.json's visual section (visual_model's description, plus e.g. remote_meshes).
+    spec: task_spec's; vis_bin, visual: visual_model's meshes and their description (plus e.g.
+    remote_meshes), into visual.bin's header; python: python_files'.
     """
-    spec["visual"] = {"file": "visual.bin.gz", **visual}
-    spec["bundle_id"] = bundle_id(spec, mjb, vis_bin)
+    vis_bin = pack_visual(vis_bin, visual)
+    spec["visual"] = {"file": "visual.bin.gz"}
+    spec["python"]["files"] = sorted(python)  # what the extension fetches into Pyodide
+    spec["bundle_id"] = bundle_id(spec, mjb, vis_bin, python)
     # Written next to sim/ and swapped in: the extension may read it while training runs, and must never see
     # half a bundle, or this run's model next to a previous run's sim.json
     sim = Path(out_dir) / SIM_DIR
@@ -246,6 +273,9 @@ def write_bundle(out_dir, spec, mjb, vis_bin, visual):
     (tmp / "scene.mjb.gz").write_bytes(gzip.compress(mjb, 9, mtime=0))
     (tmp / "visual.bin.gz").write_bytes(gzip.compress(vis_bin, 9, mtime=0))
     (tmp / "sim.json").write_text(json.dumps(spec, indent=1))
+    for rel, src in python.items():
+        (tmp / PYTHON_DIR / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp / PYTHON_DIR / rel).write_bytes(src)
     shutil.rmtree(sim, ignore_errors=True)
     tmp.rename(sim)
     faces = sum(m["face_count"] for m in visual.get("meshes", []))
@@ -260,6 +290,138 @@ def write_policy(out_dir, onnx_path):
     d.mkdir(parents=True, exist_ok=True)
     shutil.copy2(onnx_path, d / "model.onnx")
     return d / "model.onnx"
+
+
+# ----------------------------------------------------------------------------------------------------------
+# python/: the block's Robot and Task, as the extension runs them
+# ----------------------------------------------------------------------------------------------------------
+# Pyodide has the standard library and numpy, not mujoco, gymnasium or torch. So the task's and the robot's
+# modules, and the block's modules they import, may import only those, ei_rl.sim, and each other. A block's
+# package __init__.py usually imports more (a gymnasium registration): the bundle's are empty.
+
+BROWSER_PACKAGES = ("numpy",)
+
+# The standard library modules the extension's Pyodide (314.0.8, Python 3.14) can't import: those it leaves
+# out, and those Python 3.13 removed (PEP 594), which the blocks' Python 3.12 still lists. Measured by
+# importing every module of sys.stdlib_module_names in that Pyodide.
+NOT_IN_BROWSER = frozenset({
+    "curses", "dbm", "ensurepip", "grp", "idlelib", "msvcrt", "nt", "pwd", "pydoc_data", "readline", "resource",
+    "syslog", "tkinter", "turtle", "turtledemo", "venv", "winreg", "winsound",
+    "aifc", "audioop", "cgi", "cgitb", "chunk", "crypt", "imghdr", "lib2to3", "mailcap", "msilib", "nis",
+    "nntplib", "ossaudiodev", "pipes", "sndhdr", "spwd", "sunau", "telnetlib", "uu", "xdrlib",
+})
+
+
+def _external_ok(base, names):
+    top = base.partition(".")[0]
+    if (top in sys.stdlib_module_names and top not in NOT_IN_BROWSER) or top in BROWSER_PACKAGES:
+        return True
+    if base == "ei_rl.sim":
+        return "native" not in names  # ei_rl.sim.native is mujoco's side
+    return base == "ei_rl" and set(names) == {"sim"}
+
+
+def check_imports(path, module):
+    """The imports of the module `module` (its file: path): [(line, imported module, [names from it])],
+    relative imports resolved. `import a.b` gives ('a.b', [])."""
+    tree = ast.parse(Path(path).read_text(), str(path))
+    package = module if Path(path).name == "__init__.py" else module.rpartition(".")[0]
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out += [(node.lineno, a.name, []) for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                parts = package.split(".")[:len(package.split(".")) - (node.level - 1)]
+                base = ".".join(parts + ([node.module] if node.module else []))
+            out.append((node.lineno, base, [a.name for a in node.names]))
+    return out
+
+
+def python_files(*classes):
+    """python/ for the classes (the task and the robot): their modules, the block's modules they import (with
+    empty package __init__.py files) and ei_rl.sim with its field table, as {path under python/: bytes}.
+    Raises ValueError, with every offending import, if any of them imports what Pyodide can't."""
+    roots = {c.__module__.partition(".")[0] for c in classes}
+    files, errors, todo = {}, [], [c.__module__ for c in classes]
+    for c in classes:
+        if inspect.getsourcefile(c).endswith("__init__.py"):
+            raise ValueError(f"{c.__qualname__} is in {c.__module__}/__init__.py, which the bundle leaves empty: "
+                             "move it to a module of its own")
+    while todo:
+        mod = todo.pop()
+        rel = mod.replace(".", "/") + ".py"
+        if rel in files:
+            continue
+        origin = importlib.util.find_spec(mod).origin
+        files[rel] = Path(origin).read_bytes()
+        for line, base, names in check_imports(origin, mod):
+            if _external_ok(base, names):
+                continue
+            where = f"{Path(origin).name}:{line}"
+            if base.partition(".")[0] not in roots:
+                shown = "ei_rl.sim.native" if base == "ei_rl.sim" else base
+                errors.append(f"{where}: imports {shown}, which the browser doesn't have (only the standard "
+                              f"library, {', '.join(BROWSER_PACKAGES)}, ei_rl.sim and the block's own modules)")
+                continue
+            spec = importlib.util.find_spec(base)
+            if spec is None:
+                errors.append(f"{where}: no module {base}")
+            elif spec.submodule_search_locations is None:
+                todo.append(base)
+            else:  # a package: only its submodules, its __init__.py is empty in the bundle
+                for n in names or [None]:
+                    sub = n and importlib.util.find_spec(f"{base}.{n}")
+                    if sub is None:
+                        errors.append(f"{where}: {base}{'.' + n if n else ''} comes from {base}/__init__.py, which "
+                                      "the bundle leaves empty: import it from its own module")
+                    else:
+                        todo.append(f"{base}.{n}")
+    if errors:
+        raise ValueError("The task's Python can't run in the extension:\n  " + "\n  ".join(errors))
+    for rel in list(files):
+        for i in range(1, rel.count("/") + 1):
+            files.setdefault("/".join(rel.split("/")[:i]) + "/__init__.py", b"")
+    files.update(sim_files())
+    return files
+
+
+def sim_files():
+    """ei_rl.sim as the bundle ships it, {path under python/: bytes}: its modules but native.py, and fields.json,
+    the field table of this MuJoCo. A block's check compares a written bundle's copy with this."""
+    from .sim.native import field_table
+    files = {"ei_rl/__init__.py": b'"""ei_rl.sim, the simulation contract, as the bundle ships it."""\n'}
+    for f in sorted((Path(__file__).parent / "sim").glob("*.py")):
+        if f.name != "native.py":
+            files[f"ei_rl/sim/{f.name}"] = f.read_bytes()
+    files["ei_rl/sim/fields.json"] = json.dumps(field_table(), sort_keys=True).encode()
+    return files
+
+
+def task_spec(task_cls, robot_cls, model):
+    """sim.json for a task and its robot on a model (the physics model, as written): what the extension needs
+    before it runs the Python (which MuJoCo, the entry points), and the policy's input and output sizes. Runs
+    the task once (a reset and a step, without noise or randomization) to check it and to measure its
+    observation, and describes it (Host.describe, which the extension calls at open) to check that too."""
+    from .sim import CONTRACT_VERSION
+    from .sim.native import Host, check_fields
+    host = Host(model, task_cls, robot_cls, dict(noise=False, randomize=False))
+    check_fields(host.model, host.data)
+    host.describe()
+    obs = host.reset(0 if task_cls.states else None)
+    host.step(np.zeros(robot_cls.action_dim))
+    task = host.task
+    dims = {n: int(np.size(o)) for n, o in obs.items()}
+    entry = lambda c: f"{c.__module__}:{c.__qualname__}"  # noqa: E731
+    return dict(
+        format=FORMAT, version=VERSION,
+        task=dict(id=task.id, label=task.label),
+        mujoco=dict(version=mujoco.__version__, model="scene.mjb.gz"),
+        python=dict(dir=PYTHON_DIR, contract=CONTRACT_VERSION, task=entry(task_cls), robot=entry(robot_cls),
+                    packages=list(BROWSER_PACKAGES)),
+        observation=dict(dim=dims[host.names[0]], dims=dims), action=dict(dim=int(robot_cls.action_dim)),
+    )
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -326,8 +488,8 @@ def save_checkpoint(out_dir, step, iteration, label, export, live=True):
 
 
 __all__ = [
-    "CHECKPOINT_DIR", "FORMAT", "LIVE_FORMAT", "SIM_DIR", "VERSION", "bundle_id", "checkpoint_name", "clear_policies",
-    "cluster_mesh", "load_model", "mj_id", "model_bytes", "physics_model", "print_live_checkpoint",
-    "print_live_header", "rounded", "save_checkpoint", "uniform_noise", "visual_model", "write_bundle",
-    "write_policy",
+    "BROWSER_PACKAGES", "CHECKPOINT_DIR", "FORMAT", "LIVE_FORMAT", "PYTHON_DIR", "SIM_DIR", "VERSION", "bundle_id",
+    "check_imports", "checkpoint_name", "clear_policies", "cluster_mesh", "load_model", "mj_id", "model_bytes",
+    "pack_visual", "physics_model", "print_live_checkpoint", "print_live_header", "python_files", "rounded",
+    "save_checkpoint", "sim_files", "task_spec", "uniform_noise", "unpack_visual", "visual_model", "write_bundle", "write_policy",
 ]
