@@ -8,12 +8,15 @@ The format belongs to the extension (rl_policy_simulator_extension, whose README
 and the task are the block's own Python (a Robot and a Task, see ei_rl.sim), which the extension runs as-is in
 Pyodide; this module checks they can run there, copies them, and writes the rest.
 
-  <custom data>/sim/sim.json        what the extension needs before it runs the Python: timing, the agents,
-                                    the commands and settings, the start states' labels, the entry points
+  <custom data>/sim/sim.json        what the extension needs before it runs the Python: which MuJoCo, which
+                                    files, the entry points, the policy's input and output sizes. The rest
+                                    (the agents, commands, settings, camera, ...) the Python gives at open
+                                    (Host.describe)
   <custom data>/sim/python/         robot.py, env.py, what they import from the block, and ei_rl.sim
   <custom data>/sim/scene.mjb.gz    the compiled MuJoCo model the policy trained on, minus the visual-only
                                     geoms (physics_model): the physics is bitwise identical
-  <custom data>/sim/visual.bin.gz   what to draw: the visible meshes, decimated (visual_model)
+  <custom data>/sim/visual.bin.gz   what to draw (visual_model, pack_visual): a JSON header (the geoms, the
+                                    meshes, remote_meshes), then the meshes, decimated
   <custom data>/policy/model.onnx   the trained policy
   <custom data>/checkpoints/        the policy while training, for live runs (see below)
 """
@@ -33,7 +36,7 @@ import mujoco
 import numpy as np
 
 FORMAT = "ei-rl-sim"
-VERSION = 3
+VERSION = 4
 PYTHON_DIR = "python"
 SIM_DIR = "sim"
 POLICY_DIR = "policy"
@@ -177,8 +180,8 @@ def visual_model(full, cell=0.001, groups=(0, 1, 2), with_group=False):
     """What to draw: every geom in a visible group, each mesh once, decimated to a `cell` grid (m).
 
     Mesh vertices are in the mesh frame of the compiled model, so geom_pos / geom_quat place them exactly.
-    with_group: give each geom its group (for sim.json's visual.remote_meshes, which replace a group).
-    Returns (bytes of visual.bin, its description for sim.json: meshes and geoms).
+    with_group: give each geom its group (for visual.bin's remote_meshes, which replace a group).
+    Returns (the meshes' bytes, their description: meshes and geoms), for pack_visual.
     """
     mesh_index, meshes, chunks, offset = {}, [], [], 0
     geoms = []
@@ -220,6 +223,20 @@ def visual_model(full, cell=0.001, groups=(0, 1, 2), with_group=False):
     return b"".join(chunks), {"meshes": meshes, "geoms": geoms}
 
 
+def pack_visual(mesh_bytes, visual):
+    """visual.bin: a uint32 (little-endian) n, n bytes of JSON (`visual`: geoms, meshes, remote_meshes; padded
+    with spaces so the meshes stay 4-byte aligned), then the meshes (their offsets count from there)."""
+    head = json.dumps(visual, separators=(",", ":")).encode()
+    head += b" " * (-len(head) % 4)
+    return len(head).to_bytes(4, "little") + head + mesh_bytes
+
+
+def unpack_visual(vis_bin):
+    """pack_visual's inverse: (the header, the meshes' bytes)."""
+    n = int.from_bytes(vis_bin[:4], "little")
+    return json.loads(vis_bin[4:4 + n]), vis_bin[4 + n:]
+
+
 # ----------------------------------------------------------------------------------------------------------
 # The bundle
 # ----------------------------------------------------------------------------------------------------------
@@ -236,13 +253,14 @@ def bundle_id(spec, mjb, vis_bin, python=None):
 
 
 def write_bundle(out_dir, spec, mjb, vis_bin, visual, python):
-    """Write <out_dir>/sim/: sim.json (`spec`, plus its visual and bundle_id), scene.mjb.gz, visual.bin.gz and
-    python/. Returns the sim directory.
+    """Write <out_dir>/sim/: sim.json (`spec`, plus the visual file and bundle_id), scene.mjb.gz,
+    visual.bin.gz and python/. Returns the sim directory.
 
-    spec: task_spec's; visual: sim.json's visual section (visual_model's description, plus e.g.
-    remote_meshes); python: python_files'.
+    spec: task_spec's; vis_bin, visual: visual_model's meshes and their description (plus e.g.
+    remote_meshes), into visual.bin's header; python: python_files'.
     """
-    spec["visual"] = {"file": "visual.bin.gz", **visual}
+    vis_bin = pack_visual(vis_bin, visual)
+    spec["visual"] = {"file": "visual.bin.gz"}
     spec["python"]["files"] = sorted(python)  # what the extension fetches into Pyodide
     spec["bundle_id"] = bundle_id(spec, mjb, vis_bin, python)
     # Written next to sim/ and swapped in: the extension may read it while training runs, and must never see
@@ -373,32 +391,26 @@ def python_files(*classes):
 
 
 def task_spec(task_cls, robot_cls, model):
-    """sim.json for a task and its robot on a model (the physics model, as written): the entry points, the
-    timing, what the extension's controls are, the policy's input and output sizes. Runs the task once (a
-    reset and a step, without noise or randomization) to check it and to measure its observation."""
-    from .sim import CONTRACT_VERSION, camera
+    """sim.json for a task and its robot on a model (the physics model, as written): what the extension needs
+    before it runs the Python (which MuJoCo, the entry points), and the policy's input and output sizes. Runs
+    the task once (a reset and a step, without noise or randomization) to check it and to measure its
+    observation, and describes it (Host.describe, which the extension calls at open) to check that too."""
+    from .sim import CONTRACT_VERSION
     from .sim.native import Host, check_fields
     host = Host(model, task_cls, robot_cls, dict(noise=False, randomize=False))
     check_fields(host.model, host.data)
+    host.describe()
     obs = host.reset(0 if task_cls.states else None)
     host.step(np.zeros(robot_cls.action_dim))
     task = host.task
     dims = {n: int(np.size(o)) for n, o in obs.items()}
     entry = lambda c: f"{c.__module__}:{c.__qualname__}"  # noqa: E731
-    cam = dict(camera() if task.camera is None else task.camera)
-    track = cam.pop("track")
-    cam["track_body_id"] = None if track is None else host.sim.id("body", track)
-    for g in task.layout:
-        host.sim.id("geom", g)  # each must be in the model
     return dict(
         format=FORMAT, version=VERSION,
         task=dict(id=task.id, label=task.label),
-        mujoco=dict(version=mujoco.__version__, model="scene.mjb.gz", physics_dt=float(model.opt.timestep),
-                    decimation=int(task.decimation)),
+        mujoco=dict(version=mujoco.__version__, model="scene.mjb.gz"),
         python=dict(dir=PYTHON_DIR, contract=CONTRACT_VERSION, task=entry(task_cls), robot=entry(robot_cls),
                     packages=list(BROWSER_PACKAGES)),
-        agents=task.agents, commands=task.commands, settings=list(task.settings) + list(robot_cls.settings),
-        keys=robot_cls.keys, states=list(task.states), episode_s=task.episode_s, camera=cam, layout=list(task.layout),
         observation=dict(dim=dims[host.names[0]], dims=dims), action=dict(dim=int(robot_cls.action_dim)),
     )
 
@@ -469,6 +481,6 @@ def save_checkpoint(out_dir, step, iteration, label, export, live=True):
 __all__ = [
     "BROWSER_PACKAGES", "CHECKPOINT_DIR", "FORMAT", "LIVE_FORMAT", "PYTHON_DIR", "SIM_DIR", "VERSION", "bundle_id",
     "check_imports", "checkpoint_name", "clear_policies", "cluster_mesh", "load_model", "mj_id", "model_bytes",
-    "physics_model", "print_live_checkpoint", "print_live_header", "python_files", "rounded", "save_checkpoint",
-    "task_spec", "uniform_noise", "visual_model", "write_bundle", "write_policy",
+    "pack_visual", "physics_model", "print_live_checkpoint", "print_live_header", "python_files", "rounded",
+    "save_checkpoint", "task_spec", "uniform_noise", "unpack_visual", "visual_model", "write_bundle", "write_policy",
 ]

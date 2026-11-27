@@ -134,9 +134,10 @@ writes its bundle, for the simulator's parity test.
   trains in, saved in `sim/`:
   - `scene.mjb.gz`: the physics model, compiled as the policy trained on it;
   - `visual.bin.gz`: what to draw;
-  - `sim.json`: the task's description (`task_spec`): its agents, commands, settings, start states, camera, and
-    the sizes of the observation and the action;
-  - `python/`: the block's Robot and Task, which the simulator runs.
+  - `sim.json`: the manifest (`task_spec`): the MuJoCo version, the Python's files and entry points, and the sizes
+    of the observation and the action;
+  - `python/`: the block's Robot and Task, which the simulator runs. They describe the page too (`Host.describe`):
+    the agents, commands, settings, start states, camera.
 
   The simulator also runs the **checkpoints** the block saves in `checkpoints/` while it trains, so you can
   watch the policy improve before the job ends.

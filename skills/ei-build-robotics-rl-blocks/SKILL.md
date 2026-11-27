@@ -532,13 +532,14 @@ def write_bundle(out_dir):
    visual-only geoms, checks it simulates exactly as the full model under random controls, and returns
    `(model, mjb bytes)`. It drops every geom with `contype = conaffinity = 0`, including those a sensor or a ray
    sees: when the task needs them, write the model it trains on with `bundle.model_bytes(model)` instead.
-2. **Visuals:** `bundle.visual_model(full)` decimates the meshes into `visual.bin` and lists every visual geom,
-   by name (the layout's geoms are matched by name). A mesh that may not be redistributed goes in
+2. **Visuals:** `bundle.visual_model(full)` decimates the meshes and lists every visual geom, by name (the
+   layout's geoms are matched by name); `write_bundle` puts the list in `visual.bin`'s header. A mesh that may not be redistributed goes in
    `visual["remote_meshes"]` instead (see Assets; `with_group=True` gives each geom its group).
-3. **sim.json:** `bundle.task_spec(task_cls, robot_cls, model)` reads it from the classes: the entry points,
-   the timing, the agents, commands, settings, keys, states, camera and layout, and the observation and action
-   sizes. It runs one reset and one step (no noise, no randomization) to check them, and fails if a layout
-   geom or the tracked body isn't in the model.
+3. **sim.json:** `bundle.task_spec(task_cls, robot_cls, model)` is the manifest: the MuJoCo version, the entry
+   points, and the observation and action sizes. The rest of the page (agents, commands, settings, keys,
+   states, camera, layout, dt) the extension gets from the Python at open, `Host.describe()`. It runs one reset
+   and one step (no noise, no randomization) and `describe()` to check them, and fails if a layout geom or the
+   tracked body isn't in the model.
 4. **python/:** `bundle.python_files(task_cls, robot_cls)` collects their modules, the block's modules they
    import, and `ei_rl.sim` (without `native.py`). It raises `ValueError`, listing every import Pyodide can't
    run.

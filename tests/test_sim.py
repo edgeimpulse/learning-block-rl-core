@@ -1,9 +1,10 @@
 # Copyright (c) 2026 EdgeImpulse Inc.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-"""The simulation contract (ei_rl.sim) and its bundle (python/, sim.json v3), on a toy task (toy_sim)."""
+"""The simulation contract (ei_rl.sim) and its bundle (python/, sim.json v4), on a toy task (toy_sim)."""
 
 import contextlib
+import gzip
 import io
 import json
 import sys
@@ -73,6 +74,13 @@ class HostTest(unittest.TestCase):
         self.assertEqual(d["reason"], "time_out")
         self.assertEqual(host.steps, round(Rail.episode_s / host.sim.dt))
 
+    def test_describe(self):
+        ui = Host(self.model, Rail, Cart).describe()
+        self.assertEqual([s["name"] for s in ui["settings"]], ["lag_s"])
+        self.assertEqual((ui["camera"]["track_body_id"], ui["layout"]), (1, ["rail"]))
+        self.assertEqual(ui["dt"], self.model.opt.timestep * Rail.decimation)
+        json.dumps(ui)  # it crosses to JavaScript
+
     def test_action_delay(self):
         now, _ = episode(Host(self.model, Rail, Cart, dict(noise=False, randomize=False)))
         late, _ = episode(Host(self.model, Rail, Cart, dict(noise=False, randomize=False, action_delay=2)))
@@ -127,14 +135,17 @@ class BundleTest(unittest.TestCase):
     def test_round_trip(self):
         model = mujoco.MjModel.from_xml_string(XML)
         spec = bundle.task_spec(Rail, Cart, model)
-        self.assertEqual((spec["version"], spec["observation"]["dim"], spec["action"]["dim"]), (3, 4, 1))
+        self.assertEqual((spec["version"], spec["observation"]["dim"], spec["action"]["dim"]), (4, 4, 1))
         self.assertEqual(spec["python"]["task"], "toy_sim.env:Rail")
-        self.assertEqual([s["name"] for s in spec["settings"]], ["lag_s"])
-        self.assertEqual((spec["camera"]["track_body_id"], spec["layout"]), (1, ["rail"]))
+        self.assertNotIn("settings", spec)  # the Python describes the UI at open
+        visual = {"geoms": [{"name": "rail"}], "meshes": []}
         with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()):
-            sim_dir = bundle.write_bundle(d, spec, bundle.model_bytes(model), b"", {},
+            sim_dir = bundle.write_bundle(d, spec, bundle.model_bytes(model), b"\x01\x02", visual,
                                           bundle.python_files(Rail, Cart))
-            json.loads((sim_dir / "sim.json").read_text())
+            self.assertEqual(json.loads((sim_dir / "sim.json").read_text())["visual"], {"file": "visual.bin.gz"})
+            vis = gzip.decompress((sim_dir / "visual.bin.gz").read_bytes())
+            self.assertEqual(int.from_bytes(vis[:4], "little") % 4, 0)
+            self.assertEqual(bundle.unpack_visual(vis), (visual, b"\x01\x02"))
             # the bundle's copy, not this directory's
             saved = {k: sys.modules.pop(k) for k in list(sys.modules) if k.split(".")[0] == "toy_sim"}
             try:
