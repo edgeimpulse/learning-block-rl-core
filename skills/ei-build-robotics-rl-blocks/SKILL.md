@@ -380,8 +380,8 @@ step(actions)   robot.command(sim, action) for each robot               the acti
                 task.done(sim)                                          -> ({name: obs}, done or None)
 ```
 
-`rng` is a numpy Generator the host seeds: the same seed gives the same episode in training and in the browser,
-so draw every random number from it. `sim.options` holds the host's switches (`noise`, `randomize`, `obs_delay`,
+`rng` is a numpy Generator the host seeds: the same seed gives the same random draws in training and in the
+browser (and the same episode when their MuJoCo versions match), so draw every random number from it. `sim.options` holds the host's switches (`noise`, `randomize`, `obs_delay`,
 `action_delay`) and the declared settings' values. The two delays are the host's: whole policy steps on top of any
 latency the robot models itself, which stays the block's (per sensor, randomized as trained).
 
