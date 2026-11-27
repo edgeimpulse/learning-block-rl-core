@@ -26,7 +26,7 @@ class Host:
 
     def __init__(self, sim, task_cls, robot_cls, options=None, seed=0):
         settings = {s["name"]: s["default"] for s in list(task_cls.settings) + list(robot_cls.settings)}
-        sim.options = dict(DEFAULT_OPTIONS, **settings, **(options or {}))
+        sim.options = {**DEFAULT_OPTIONS, **settings, **(options or {})}  # options win over the defaults
         self.sim = sim
         self.names = [a["name"] for a in task_cls.agents]
         self.robots = {n: robot_cls(sim, n) for n in self.names}  # one per agent, before the task: it gets them
