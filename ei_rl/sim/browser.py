@@ -15,12 +15,14 @@ The extension passes `bridge`, a JS object:
   view(kind, name)     kind 'model' or 'data': MuJoCo's typed array of that field (flat)
   size(name)           a size of the model (nq, nbody, ...)
   time()               data.time
+  timestep()           the model's opt.timestep
   reset_data(), step(), forward()
   name2id(kind, name), id2name(kind, id)
   ray(pnt, vec, geomgroup or null, flg_static, bodyexclude) -> [distance, geom id]
 """
 
 import importlib
+import json
 
 import numpy as np
 from pyodide.ffi import to_js
@@ -56,9 +58,9 @@ class _Data(_Fields):
 
 
 class BrowserSim(Sim):
-    def __init__(self, bridge, physics_dt, decimation, options=None):
+    def __init__(self, bridge, decimation, options=None):
         self._bridge = bridge
-        self.physics_dt = float(physics_dt)
+        self.physics_dt = float(bridge.timestep())
         self.decimation = int(decimation)
         self.options = dict(_host.DEFAULT_OPTIONS, **(options or {}))
         self._model = {}  # name -> [array, its value as last written]
@@ -129,12 +131,16 @@ class BrowserSim(Sim):
 
 
 class Host(_host.Host):
-    """The loop, on the extension's MuJoCo: Host(bridge, spec, task_cls, robot_cls, options, seed). Its calls
-    take and give what JS can read: observations as lists of floats, actions as sequences."""
+    """The loop, on the extension's MuJoCo: Host(bridge, task_cls, robot_cls, options, seed). Its calls take
+    and give what JS can read: observations as lists of floats, actions as sequences."""
 
-    def __init__(self, bridge, spec, task_cls, robot_cls, options=None, seed=0):
-        sim = BrowserSim(bridge, spec["mujoco"]["physics_dt"], task_cls.decimation)
+    def __init__(self, bridge, task_cls, robot_cls, options=None, seed=0):
+        sim = BrowserSim(bridge, task_cls.decimation)
         super().__init__(sim, task_cls, robot_cls, _plain(options), seed)
+
+    def describe_js(self):
+        """describe(), as JSON: JS parses it into what sim.json used to carry (None is null, not undefined)."""
+        return json.dumps(self.describe())
 
     def reset_js(self, state=None):
         self.sim._drop()  # the page may have moved things since the last call
@@ -172,7 +178,7 @@ class Host(_host.Host):
 def make_host(bridge, spec, options=None, seed=0):
     """The Host of a bundle (its sim.json, as JS gives it), on the extension's MuJoCo."""
     spec = _plain(spec)
-    return Host(bridge, spec, _load(spec["python"]["task"]), _load(spec["python"]["robot"]), options, seed)
+    return Host(bridge, _load(spec["python"]["task"]), _load(spec["python"]["robot"]), options, seed)
 
 
 def _load(entry):

@@ -132,7 +132,7 @@ class Sim:
 
 
 # ----------------------------------------------------------------------------------------------------------
-# What a task and a robot declare for the extension: plain dicts, so they go into sim.json as they are
+# What a task and a robot declare for the extension: plain dicts, which Host.describe passes on as they are
 # ----------------------------------------------------------------------------------------------------------
 
 def agent(name, label=None, drivers=("policy", "keyboard", "none")):
