@@ -282,10 +282,20 @@ def write_policy(out_dir, onnx_path):
 
 BROWSER_PACKAGES = ("numpy",)
 
+# The standard library modules the extension's Pyodide (314.0.8, Python 3.14) can't import: those it leaves
+# out, and those Python 3.13 removed (PEP 594), which the blocks' Python 3.12 still lists. Measured by
+# importing every module of sys.stdlib_module_names in that Pyodide.
+NOT_IN_BROWSER = frozenset({
+    "curses", "dbm", "ensurepip", "grp", "idlelib", "msvcrt", "nt", "pwd", "pydoc_data", "readline", "resource",
+    "syslog", "tkinter", "turtle", "turtledemo", "venv", "winreg", "winsound",
+    "aifc", "audioop", "cgi", "cgitb", "chunk", "crypt", "imghdr", "lib2to3", "mailcap", "msilib", "nis",
+    "nntplib", "ossaudiodev", "pipes", "sndhdr", "spwd", "sunau", "telnetlib", "uu", "xdrlib",
+})
+
 
 def _external_ok(base, names):
     top = base.partition(".")[0]
-    if top in sys.stdlib_module_names or top in BROWSER_PACKAGES:
+    if (top in sys.stdlib_module_names and top not in NOT_IN_BROWSER) or top in BROWSER_PACKAGES:
         return True
     if base == "ei_rl.sim":
         return "native" not in names  # ei_rl.sim.native is mujoco's side
