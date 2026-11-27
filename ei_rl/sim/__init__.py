@@ -10,8 +10,8 @@ A block describes its robot and its task in two files:
   env.py     a Task: the start states, what the robots observe, when an episode ends, and what the
              extension shows (commands, settings, metrics, markers)
 
-Both run against a Sim: the MuJoCo model and data as numpy arrays (the fields in MODEL_FIELDS and DATA_FIELDS,
-shaped as the mujoco Python bindings shape them), and a few functions. The same Sim runs in training
+Both run against a Sim: the MuJoCo model and data as numpy arrays (MuJoCo's own fields, see below), and a few
+functions. The same Sim runs in training
 (ei_rl.sim.native, on mujoco) and in the extension (ei_rl.sim.browser, on MuJoCo WASM). So the two files
 import only the standard library, numpy, ei_rl.sim and each other; ei_rl.bundle checks that and copies them,
 with this module, into the bundle. This module itself imports nothing else.
@@ -43,57 +43,40 @@ switches (noise, randomize, obs_delay, action_delay) and the values of the decla
 
 import numpy as np
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 
-# The fields a Sim gives: name -> (rows, columns). rows is a size of the model (an attribute of sim.model),
-# columns None for a one-dimensional field. Natively these are views of mujoco's arrays; in the browser,
-# copies, written back after each call (for the data fields in WRITABLE_DATA, and every model field).
+# The fields a Sim gives are MuJoCo's own: every numeric array and size of mjModel and mjData, as
+# mujoco.introspect lists them for the bundle's MuJoCo version (ei_rl.sim.native.field_table; the bundle ships
+# it as ei_rl/sim/fields.json), shaped as the mujoco Python bindings shape them. A field MuJoCo adds is in the
+# contract on the next MuJoCo version, with no change here or in the extension.
+# The sizes of mjData (ncon, nefc, ...) change every step, and so do the arrays they size (efc_*): read them
+# each time. data.contact: the active contacts, read-only, each field an array over them (contact.geom: ncon × 2,
+# contact.dist: ncon).
+# Natively these are mujoco's own arrays; in the browser, copies, written back after each call if they changed.
 # So don't keep a data field across calls: read it from sim.data each time (a kept copy is read-only).
-# No contacts (data.contact, efc_*): for touch or contact, add a touch or contact sensor and read sensordata.
-MODEL_FIELDS = {
-    "body_parentid": ("nbody", None), "body_rootid": ("nbody", None), "body_jntadr": ("nbody", None),
-    "body_jntnum": ("nbody", None), "body_dofadr": ("nbody", None), "body_mocapid": ("nbody", None),
-    "body_pos": ("nbody", 3), "body_quat": ("nbody", 4), "body_ipos": ("nbody", 3),
-    "body_mass": ("nbody", None), "body_inertia": ("nbody", 3),
-    "body_contype": ("nbody", None), "body_conaffinity": ("nbody", None),
-    "jnt_type": ("njnt", None), "jnt_qposadr": ("njnt", None), "jnt_dofadr": ("njnt", None),
-    "jnt_bodyid": ("njnt", None), "jnt_range": ("njnt", 2),
-    "dof_bodyid": ("nv", None), "dof_jntid": ("nv", None), "dof_damping": ("nv", None),
-    "dof_frictionloss": ("nv", None), "dof_armature": ("nv", None),
-    "geom_type": ("ngeom", None), "geom_bodyid": ("ngeom", None), "geom_group": ("ngeom", None),
-    "geom_contype": ("ngeom", None), "geom_conaffinity": ("ngeom", None),
-    "geom_size": ("ngeom", 3), "geom_rbound": ("ngeom", None), "geom_pos": ("ngeom", 3),
-    "geom_quat": ("ngeom", 4), "geom_friction": ("ngeom", 3), "geom_rgba": ("ngeom", 4),
-    "site_bodyid": ("nsite", None), "site_pos": ("nsite", 3), "site_quat": ("nsite", 4),
-    "cam_bodyid": ("ncam", None), "cam_pos": ("ncam", 3), "cam_quat": ("ncam", 4), "cam_fovy": ("ncam", None),
-    "actuator_trnid": ("nu", 2), "actuator_gear": ("nu", 6), "actuator_ctrlrange": ("nu", 2),
-    "actuator_forcerange": ("nu", 2), "actuator_gainprm": ("nu", 10), "actuator_biasprm": ("nu", 10),
-    "sensor_type": ("nsensor", None), "sensor_objid": ("nsensor", None), "sensor_dim": ("nsensor", None),
-    "sensor_adr": ("nsensor", None), "sensor_cutoff": ("nsensor", None),
-    "qpos0": ("nq", None), "key_qpos": ("nkey", "nq"), "key_qvel": ("nkey", "nv"),
-}
-MODEL_SIZES = ("nq", "nv", "nu", "na", "nbody", "njnt", "ngeom", "nsite", "ncam", "nsensor", "nsensordata",
-               "nmocap", "nkey")
-DATA_FIELDS = {
-    "qpos": ("nq", None), "qvel": ("nv", None), "qacc": ("nv", None), "act": ("na", None),
-    "ctrl": ("nu", None), "qfrc_applied": ("nv", None), "xfrc_applied": ("nbody", 6),
-    "mocap_pos": ("nmocap", 3), "mocap_quat": ("nmocap", 4),
-    "qfrc_actuator": ("nv", None), "actuator_force": ("nu", None), "actuator_length": ("nu", None),
-    "actuator_velocity": ("nu", None),
-    "xpos": ("nbody", 3), "xquat": ("nbody", 4), "xmat": ("nbody", 9), "xipos": ("nbody", 3),
-    "cvel": ("nbody", 6), "subtree_com": ("nbody", 3),
-    "geom_xpos": ("ngeom", 3), "geom_xmat": ("ngeom", 9), "site_xpos": ("nsite", 3), "site_xmat": ("nsite", 9),
-    "cam_xpos": ("ncam", 3), "cam_xmat": ("ncam", 9), "sensordata": ("nsensordata", None),
-}
-WRITABLE_DATA = ("qpos", "qvel", "act", "ctrl", "qfrc_applied", "xfrc_applied", "mocap_pos", "mocap_quat")
+# Not in it: the structs other than contact (opt, vis, stat, the solver's statistics), strings (names: name2id,
+# id2name), and MuJoCo's functions other than mj_step, mj_forward, mj_resetData and mj_ray.
+
+
+def field_shape(extent, size):
+    """A field's shape: its extent in the field table (sizes by name, 'nmocap*3', numbers), size(name) a size."""
+    dims = []
+    for e in extent:
+        if isinstance(e, str):
+            name, _, k = e.partition("*")
+            e = size(name) * (int(k) if k else 1)
+        dims.append(int(e))
+    return tuple(dims)
+
+
 OBJECT_KINDS = ("body", "joint", "geom", "site", "camera", "actuator", "sensor", "mesh", "tendon")
 
 
 class Sim:
     """What robot.py and env.py see. Implemented by ei_rl.sim.native.NativeSim and ei_rl.sim.browser.
 
-    model, data   the fields of MODEL_FIELDS and DATA_FIELDS (and the sizes of MODEL_SIZES on model), as
-                  numpy arrays; data.time, the simulation time (s)
+    model, data   mjModel's and mjData's numeric arrays and sizes, as numpy arrays and numbers (data.time, the
+                  simulation time, s); data.contact, the active contacts
     physics_dt    the physics time step (s); decimation: physics steps per policy step; dt: the policy step
     options       the host's switches and the settings' values (see the module docstring)
     """
@@ -296,5 +279,5 @@ class Task:
         return []
 
 
-__all__ = ["CONTRACT_VERSION", "DATA_FIELDS", "MODEL_FIELDS", "MODEL_SIZES", "OBJECT_KINDS", "WRITABLE_DATA",
-           "Robot", "Sim", "Task", "agent", "arrow", "camera", "command", "done", "metric", "point", "setting"]
+__all__ = ["CONTRACT_VERSION", "OBJECT_KINDS", "Robot", "Sim", "Task", "agent", "arrow", "camera", "command", "done",
+           "field_shape", "metric", "point", "setting"]

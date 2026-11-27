@@ -18,8 +18,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 
 from ei_rl import bundle  # noqa: E402
-from ei_rl.sim.native import Host, from_bundle  # noqa: E402
-from toy_sim import XML  # noqa: E402
+from ei_rl.sim.native import Host, check_fields, from_bundle  # noqa: E402
+from toy_sim import XML, drop  # noqa: E402
 from toy_sim.bad import Bad  # noqa: E402
 from toy_sim.env import Rail  # noqa: E402
 from toy_sim.robot import Cart  # noqa: E402
@@ -94,12 +94,30 @@ class HostTest(unittest.TestCase):
         np.testing.assert_array_equal(late[:3], [now[0]] * 3)
         np.testing.assert_array_equal(late[2:], now[:-2])
 
-    def test_only_contract_fields(self):
-        host = Host(self.model, Rail, Cart)
+    def test_fields(self):
+        """MuJoCo's own numeric fields, solver and contacts included; the data's sizes follow each step."""
+        m = mujoco.MjModel.from_xml_string(drop.XML)
+        host = Host(m, drop.Drop, drop.Arm)
+        sim, d = host.sim, host.data
+        host.reset()
+        self.assertEqual(sim.data.ncon, 0)
+        for _ in range(60):
+            o, _ = host.step(np.array([1.0]))
+        self.assertGreater(sim.data.ncon, 0)
+        self.assertEqual(sim.data.efc_force.shape, (sim.data.nefc,))
+        self.assertEqual(sim.data.contact.geom.shape, (sim.data.ncon, 2))
+        np.testing.assert_array_equal(sim.data.qfrc_bias, d.qfrc_bias)
+        self.assertEqual(d.userdata[0], 60 * drop.Drop.decimation)  # the robot's writes
+        self.assertNotEqual(m.dof_frictionloss[-1], 0.05)
+        check_fields(m, d)
         with self.assertRaisesRegex(AttributeError, "contract"):
-            host.sim.data.efc_force  # noqa: B018
+            sim.model.names  # noqa: B018 (a string, not a numeric array)
+        with self.assertRaisesRegex(AttributeError, "contract"):
+            sim.model.opt  # noqa: B018 (a struct)
+        with self.assertRaises(ValueError):
+            sim.data.contact.dist[0] = 1.0
         with self.assertRaises(AttributeError):
-            host.sim.data.qpos = np.zeros(1)
+            sim.data.qpos = np.zeros(m.nq)
 
     def test_ray(self):
         host = Host(self.model, Rail, Cart)
@@ -116,6 +134,7 @@ class BundleTest(unittest.TestCase):
                          ["toy_sim/__init__.py", "toy_sim/env.py", "toy_sim/robot.py"])
         self.assertIn("ei_rl/sim/host.py", files)
         self.assertNotIn("ei_rl/sim/native.py", files)
+        self.assertEqual(json.loads(files["ei_rl/sim/fields.json"])["mujoco"], mujoco.__version__)
         self.assertEqual(files["toy_sim/__init__.py"], b"")
 
     def test_python_files_refuses(self):

@@ -6,15 +6,14 @@ bundle's robot.py and env.py, and the Host that steps them (ei_rl.sim.host, the 
 
 MuJoCo runs in its own WASM instance, so its arrays can't be numpy views: each field is copied in when the
 Python first reads it, and the data's copies are dropped (made read-only) after every mj_step, mj_forward and
-mj_resetData.
-Copies go back to MuJoCo before those, and at the end of each host call: the writable data fields that were
-read (WRITABLE_DATA), and the model fields that changed.
+mj_resetData. Copies that changed go back to MuJoCo before those, and at the end of each host call.
+fields.json, next to this module, is the field table of the bundle's MuJoCo (ei_rl.sim.native.field_table):
+which fields there are, and their shapes.
 
 The extension passes `bridge`, a JS object:
 
-  view(kind, name)     kind 'model' or 'data': MuJoCo's typed array of that field (flat)
-  size(name)           a size of the model (nq, nbody, ...)
-  time()               data.time
+  view(kind, name)     kind 'model' or 'data': MuJoCo's typed array of that field (flat), or its value (a size)
+  contact(name)        that field of mjContact over the active contacts, flat (a Float64Array)
   timestep()           the model's opt.timestep
   reset_data(), step(), forward()
   name2id(kind, name), id2name(kind, id)
@@ -23,38 +22,60 @@ The extension passes `bridge`, a JS object:
 
 import importlib
 import json
+from pathlib import Path
 
 import numpy as np
 from pyodide.ffi import to_js
 
-from . import DATA_FIELDS, MODEL_FIELDS, MODEL_SIZES, WRITABLE_DATA, Sim
+from . import Sim, field_shape
 from . import host as _host
+
+TABLE = json.loads((Path(__file__).parent / "fields.json").read_text())
+_INTS = {"int", "mjtByte", "mjtSize"}
 
 
 class _Fields:
-    def __init__(self, sim, kind, fields, sizes=()):
+    def __init__(self, sim, kind):
+        t = TABLE[kind]
         object.__setattr__(self, "_sim", sim)
         object.__setattr__(self, "_kind", kind)
-        object.__setattr__(self, "_fields", fields)
-        object.__setattr__(self, "_sizes", frozenset(sizes))
+        object.__setattr__(self, "_sizes", frozenset(t["sizes"]))
+        object.__setattr__(self, "_arrays", t["arrays"])
 
     def __getattr__(self, k):
         if k in self._sizes:
-            v = int(self._sim._bridge.size(k))
-            object.__setattr__(self, k, v)
+            v = self._sim._bridge.view(self._kind, k)
+            if v is None:
+                raise AttributeError(f"MuJoCo WASM {TABLE['mujoco']} has no {self._kind}.{k}")
+            if self._kind == "model":  # the model's sizes are fixed; the data's change every step
+                object.__setattr__(self, k, v)
             return v
-        if k not in self._fields:
-            raise AttributeError(f"{k!r} is not in the simulation contract (ei_rl.sim MODEL_FIELDS, DATA_FIELDS)")
+        if k not in self._arrays:
+            raise AttributeError(f"{k!r} is not in the simulation contract: not a numeric array or size of "
+                                 f"mj{self._kind.capitalize()} (MuJoCo {TABLE['mujoco']})")
         return self._sim._read(self._kind, k)
 
     def __setattr__(self, k, v):
         raise AttributeError(f"assign into sim.{k}[...], not the field itself")
 
 
+class _Contacts:
+    def __init__(self, sim):
+        object.__setattr__(self, "_sim", sim)
+
+    def __getattr__(self, k):
+        if k not in TABLE["contact"]:
+            raise AttributeError(f"{k!r} is not a field of mjContact (MuJoCo {TABLE['mujoco']})")
+        return self._sim._read_contact(k)
+
+    def __setattr__(self, k, v):
+        raise AttributeError("data.contact is read-only")
+
+
 class _Data(_Fields):
-    @property
-    def time(self):
-        return float(self._sim._bridge.time())
+    def __init__(self, sim):
+        super().__init__(sim, "data")
+        object.__setattr__(self, "contact", _Contacts(sim))
 
 
 class BrowserSim(Sim):
@@ -63,44 +84,57 @@ class BrowserSim(Sim):
         self.physics_dt = float(bridge.timestep())
         self.decimation = int(decimation)
         self.options = dict(_host.DEFAULT_OPTIONS, **(options or {}))
-        self._model = {}  # name -> [array, its value as last written]
-        self._data = {}   # name -> array, this state's
-        self.model = _Fields(self, "model", MODEL_FIELDS, MODEL_SIZES)
-        self.data = _Data(self, "data", DATA_FIELDS)
+        self._model = {}    # name -> [array, its value as last written]
+        self._data = {}     # name -> [array, its value as read], this state's
+        self._contact = {}  # name -> array, this state's
+        self.model = _Fields(self, "model")
+        self.data = _Data(self)
 
-    def _shape(self, rows, cols):
-        n = getattr(self.model, rows)
-        return (n,) if cols is None else (n, getattr(self.model, cols) if isinstance(cols, str) else cols)
+    def _size(self, name):
+        return getattr(self.model if name in TABLE["model"]["sizes"] else self.data, name)
 
     def _read(self, kind, k):
         cache = self._model if kind == "model" else self._data
         hit = cache.get(k)
         if hit is not None:
-            return hit[0] if kind == "model" else hit
-        rows, cols = (MODEL_FIELDS if kind == "model" else DATA_FIELDS)[k]
-        a = np.asarray(self._bridge.view(kind, k).to_py()).reshape(self._shape(rows, cols))
-        if kind == "model":
-            self._model[k] = [a, a.copy()]
-        else:
-            self._data[k] = a
+            return hit[0]
+        shape = field_shape(TABLE[kind]["arrays"][k], self._size)
+        v = self._bridge.view(kind, k)
+        if v is None:
+            raise AttributeError(f"MuJoCo WASM {TABLE['mujoco']} has no {kind}.{k}")
+        a = np.asarray(v.to_py())
+        if a.size != int(np.prod(shape)):
+            raise RuntimeError(f"{kind}.{k}: MuJoCo WASM gives {a.size} values, the field table {shape}")
+        a = a.reshape(shape)
+        cache[k] = [a, a.copy()]
+        return a
+
+    def _read_contact(self, k):
+        a = self._contact.get(k)
+        if a is None:
+            kind, ext = TABLE["contact"][k]
+            flat = np.asarray(self._bridge.contact(k).to_py(), np.float64)
+            a = flat.astype(np.int32) if kind in _INTS else flat
+            a = a.reshape((-1, *ext))
+            a.flags.writeable = False
+            self._contact[k] = a
         return a
 
     def flush(self):
         """The Python's writes, into MuJoCo."""
-        for k, a in self._data.items():
-            if k in WRITABLE_DATA:
-                self._bridge.view("data", k).assign(np.ascontiguousarray(a).reshape(-1))
-        for k, (a, last) in self._model.items():
-            if not np.array_equal(a, last):
-                self._bridge.view("model", k).assign(np.ascontiguousarray(a).reshape(-1))
-                last[...] = a
+        for kind, cache in (("data", self._data), ("model", self._model)):
+            for k, (a, last) in cache.items():
+                if not np.array_equal(a, last):
+                    self._bridge.view(kind, k).assign(np.ascontiguousarray(a).reshape(-1))
+                    last[...] = a
 
     def _drop(self):
         """Drop the data's copies, read-only first: a robot or a task that kept one (self.ctrl = sim.data.ctrl)
         then raises on its next write, rather than writing into a copy MuJoCo never sees."""
-        for a in self._data.values():
+        for a, _ in self._data.values():
             a.flags.writeable = False
         self._data.clear()
+        self._contact.clear()
 
     def _after(self, op):
         self.flush()

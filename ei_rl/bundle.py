@@ -12,7 +12,8 @@ Pyodide; this module checks they can run there, copies them, and writes the rest
                                     files, the entry points, the policy's input and output sizes. The rest
                                     (the agents, commands, settings, camera, ...) the Python gives at open
                                     (Host.describe)
-  <custom data>/sim/python/         robot.py, env.py, what they import from the block, and ei_rl.sim
+  <custom data>/sim/python/         robot.py, env.py, what they import from the block, and ei_rl.sim (with
+                                    fields.json, the field table of this MuJoCo)
   <custom data>/sim/scene.mjb.gz    the compiled MuJoCo model the policy trained on, minus the visual-only
                                     geoms (physics_model): the physics is bitwise identical
   <custom data>/sim/visual.bin.gz   what to draw (visual_model, pack_visual): a JSON header (the geoms, the
@@ -340,8 +341,8 @@ def check_imports(path, module):
 
 def python_files(*classes):
     """python/ for the classes (the task and the robot): their modules, the block's modules they import (with
-    empty package __init__.py files) and ei_rl.sim, as {path under python/: bytes}. Raises ValueError, with
-    every offending import, if any of them imports what Pyodide can't."""
+    empty package __init__.py files) and ei_rl.sim with its field table, as {path under python/: bytes}.
+    Raises ValueError, with every offending import, if any of them imports what Pyodide can't."""
     roots = {c.__module__.partition(".")[0] for c in classes}
     files, errors, todo = {}, [], [c.__module__ for c in classes]
     for c in classes:
@@ -382,11 +383,19 @@ def python_files(*classes):
     for rel in list(files):
         for i in range(1, rel.count("/") + 1):
             files.setdefault("/".join(rel.split("/")[:i]) + "/__init__.py", b"")
-    sim_pkg = Path(__file__).parent / "sim"
-    files["ei_rl/__init__.py"] = b'"""ei_rl.sim, the simulation contract, as the bundle ships it."""\n'
-    for f in sorted(sim_pkg.glob("*.py")):
+    files.update(sim_files())
+    return files
+
+
+def sim_files():
+    """ei_rl.sim as the bundle ships it, {path under python/: bytes}: its modules but native.py, and fields.json,
+    the field table of this MuJoCo. A block's check compares a written bundle's copy with this."""
+    from .sim.native import field_table
+    files = {"ei_rl/__init__.py": b'"""ei_rl.sim, the simulation contract, as the bundle ships it."""\n'}
+    for f in sorted((Path(__file__).parent / "sim").glob("*.py")):
         if f.name != "native.py":
             files[f"ei_rl/sim/{f.name}"] = f.read_bytes()
+    files["ei_rl/sim/fields.json"] = json.dumps(field_table(), sort_keys=True).encode()
     return files
 
 
@@ -482,5 +491,5 @@ __all__ = [
     "BROWSER_PACKAGES", "CHECKPOINT_DIR", "FORMAT", "LIVE_FORMAT", "PYTHON_DIR", "SIM_DIR", "VERSION", "bundle_id",
     "check_imports", "checkpoint_name", "clear_policies", "cluster_mesh", "load_model", "mj_id", "model_bytes",
     "pack_visual", "physics_model", "print_live_checkpoint", "print_live_header", "python_files", "rounded",
-    "save_checkpoint", "task_spec", "uniform_noise", "unpack_visual", "visual_model", "write_bundle", "write_policy",
+    "save_checkpoint", "sim_files", "task_spec", "uniform_noise", "unpack_visual", "visual_model", "write_bundle", "write_policy",
 ]
