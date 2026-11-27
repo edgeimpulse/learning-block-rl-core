@@ -36,9 +36,9 @@ Each episode and each policy step, in this order:
                   task.observe(sim, name, rng) for each robot
                   task.done(sim)
 
-rng is a numpy Generator, seeded by the host: the same seed gives the same episode in training and in the
-browser. sim.options holds the extension's switches (noise, randomize, obs_delay, action_delay) and the
-values of the declared settings.
+rng is a numpy Generator, seeded by the host: the same seed gives the same random draws in training and in
+the browser (and the same episode when their MuJoCo versions match). sim.options holds the extension's
+switches (noise, randomize, obs_delay, action_delay) and the values of the declared settings.
 """
 
 import numpy as np
