@@ -104,7 +104,7 @@ Another trainer gets the same outputs by calling `RLViz.start`, `log` and `finis
 
 ## The simulation contract
 
-`ei_rl.sim` (`CONTRACT_VERSION = 1`) is what lets the simulator run a block's simulation as it trains, with no
+`ei_rl.sim` (`CONTRACT_VERSION = 2`) is what lets the simulator run a block's simulation as it trains, with no
 code for the robot in the extension. A block writes two files, each a subclass on `ei_rl.sim`, importing only the
 standard library, numpy, `ei_rl.sim` and the block's own modules:
 
@@ -114,15 +114,18 @@ standard library, numpy, `ei_rl.sim` and the block's own modules:
   `episode_s`, `randomize`, `reset`, `observe`, `done`, `metrics`, `markers`, and the camera.
 
 They run against a `Sim` (`sim.model`, `sim.data`, `sim.id(kind, name)`, `sim.ray`, `sim.forward()`, `sim.options`),
-which holds only what MuJoCo and its WASM build both give. One loop, `ei_rl.sim.host.Host`, steps them, in the
+whose fields are MuJoCo's own: every numeric array and size of `mjModel` and `mjData`, and `data.contact`, as
+`mujoco.introspect` lists them for the bundle's MuJoCo version (the bundle ships the table, `fields.json`). One loop, `ei_rl.sim.host.Host`, steps them, in the
 same order everywhere: `ei_rl.sim.native.Host` on `mujoco` in training (a gym env wraps it and adds the rewards),
 `ei_rl.sim.browser` on MuJoCo WASM in the simulator (Pyodide). `ei_rl.bundle` copies the two files, the block's
-modules they import and `ei_rl.sim` into the bundle (`sim/python/`). The contract version changes when a field of the Sim or a method does; the simulator
-refuses a bundle with another one.
+modules they import and `ei_rl.sim` into the bundle (`sim/python/`). A new MuJoCo field needs no change here;
+the contract version changes when a method of the Sim does (a MuJoCo function such as `mj_ray`), and the
+simulator refuses a bundle with another one.
 
 [The skill](skills/ei-build-robotics-rl-blocks/SKILL.md#the-simulation-bundle) explains how to write them;
-[tests/toy_sim](tests/toy_sim) is the smallest Robot and Task, and [tests/toy_bundle.py](tests/toy_bundle.py)
-writes its bundle, for the simulator's parity test.
+[tests/toy_sim](tests/toy_sim) is the smallest Robot and Task (a cart on a rail; `drop.py`, contacts, the
+solver's fields and a model written every physics step), and [tests/toy_bundle.py](tests/toy_bundle.py) writes
+their bundles, for the simulator's parity test.
 
 ## What the extensions read
 

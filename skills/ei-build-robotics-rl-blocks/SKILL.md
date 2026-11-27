@@ -355,12 +355,15 @@ loop in Pyodide, on MuJoCo WASM. So they import only the standard library, numpy
 their own, not in a package `__init__.py`, which the bundle leaves empty. `ei_rl.sim`'s docstring is the
 specification; `tests/toy_sim/` in this repo is the smallest complete example (a cart on a rail).
 
-**The Sim** they see: `sim.model` and `sim.data`, the MuJoCo fields in `MODEL_FIELDS` and `DATA_FIELDS` as numpy
-arrays (shaped as the mujoco bindings shape them), the sizes in `MODEL_SIZES`, `sim.data.time`; `physics_dt`,
-`decimation`, `dt`; `options`; and `name2id`, `id2name`, `id` (a missing name is a `KeyError`), `ray` (mj_ray)
-and `forward` (mj_forward). The data they may write is `WRITABLE_DATA` (`qpos`, `qvel`, `act`, `ctrl`,
-`qfrc_applied`, `xfrc_applied`, `mocap_pos`, `mocap_quat`), plus any model field. A field outside the contract
-is an `AttributeError`; one more is a change to `ei_rl.sim` and to the extension (`CONTRACT_VERSION`).
+**The Sim** they see: `sim.model` and `sim.data`, every numeric array and size of `mjModel` and `mjData` as
+numpy arrays (shaped as the mujoco bindings shape them: `efc_force` is `(nefc,)`, `ncon` and `nefc` follow each
+step), and `sim.data.contact` (each field `(ncon, ...)`, read-only); `physics_dt`, `decimation`, `dt`;
+`options`; and `name2id`, `id2name`, `id` (a missing name is a `KeyError`), `ray` (mj_ray) and `forward`
+(mj_forward). Any of these arrays may be written, in place (`sim.data.qpos[:] = ...`, not `sim.data.qpos =
+...`); the simulator writes back what changed. The table is `mujoco.introspect`'s for the bundle's MuJoCo
+version (`ei_rl/sim/fields.json` in the bundle). Strings, structs other than `contact` (`opt`, `stat`) and
+other MuJoCo functions are an `AttributeError`; a function more is a change to `ei_rl.sim` and to the extension
+(`CONTRACT_VERSION`).
 
 **The order.** `Host.reset(state)` returns `{agent: observation}`, `Host.step(actions)` that and `done`:
 
